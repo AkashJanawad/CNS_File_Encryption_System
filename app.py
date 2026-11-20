@@ -135,159 +135,598 @@ def run_benchmark(sample_name: str):
     return crypto_engine.run_crypto_benchmark(data, sample_name)
 
 # ---------------------------------------------------------------------------
-# HTML Web Dashboard
+# HTML Web Dashboard (Fully self-contained CSS, zero external CDN reliance)
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def serve_ui():
-    return """
-<!DOCTYPE html>
+    return """<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CNS File Encryption System | Firebase Cloud Vault</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <title>CNS Secure File Encryption System | Firebase Cloud Vault</title>
   <style>
-    body { font-family: 'Inter', sans-serif; }
-    code, pre { font-family: 'JetBrains Mono', monospace; }
+    /* Reset & Base */
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background-color: #0b0f19;
+      color: #e2e8f0;
+      line-height: 1.5;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    /* Header */
+    header {
+      background: rgba(17, 24, 39, 0.85);
+      backdrop-filter: blur(8px);
+      border-bottom: 1px solid #1e293b;
+      position: sticky;
+      top: 0;
+      z-index: 50;
+    }
+    .header-inner {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 12px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand-wrap {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-badge {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, #f59e0b, #6366f1);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      color: #ffffff;
+      font-size: 16px;
+      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+    }
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #ffffff;
+      letter-spacing: -0.02em;
+    }
+    .brand-subtitle {
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: #34d399;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 9999px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10b981;
+      box-shadow: 0 0 8px #10b981;
+    }
+
+    /* Main Container */
+    main {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 28px 20px 48px;
+    }
+
+    /* Top Stats Grid */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 14px;
+      padding: 18px 20px;
+      transition: border-color 0.2s;
+    }
+    .stat-card:hover {
+      border-color: #334155;
+    }
+    .stat-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #64748b;
+    }
+    .stat-val {
+      font-size: 22px;
+      font-weight: 800;
+      color: #ffffff;
+      margin-top: 6px;
+      letter-spacing: -0.02em;
+    }
+    .stat-sub {
+      font-size: 12px;
+      margin-top: 4px;
+    }
+    .text-emerald { color: #34d399; }
+    .text-indigo { color: #818cf8; }
+    .text-amber { color: #fbbf24; }
+    .text-cyan { color: #22d3ee; }
+
+    /* Tabs */
+    .tabs-nav {
+      display: flex;
+      gap: 6px;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 24px;
+      overflow-x: auto;
+    }
+    .tab-btn {
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: #94a3b8;
+      font-size: 14px;
+      font-weight: 600;
+      padding: 10px 18px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .tab-btn:hover {
+      color: #e2e8f0;
+    }
+    .tab-btn.active {
+      color: #818cf8;
+      border-bottom-color: #6366f1;
+    }
+
+    /* Tab content hiding */
+    .tab-content {
+      display: block;
+    }
+    .tab-content.hidden, .hidden {
+      display: none !important;
+    }
+
+    /* Card Panels */
+    .panel {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 16px;
+      padding: 24px;
+    }
+    .panel-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #ffffff;
+      margin-bottom: 6px;
+    }
+    .panel-desc {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 20px;
+    }
+
+    /* Layout Grids */
+    .grid-2col {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 24px;
+    }
+    @media (max-width: 880px) {
+      .grid-2col { grid-template-columns: 1fr; }
+    }
+
+    /* Drag & Drop Upload Zone */
+    .upload-zone {
+      border: 2px dashed #334155;
+      background: #0b0f19;
+      border-radius: 14px;
+      padding: 36px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .upload-zone:hover {
+      border-color: #6366f1;
+      background: rgba(99, 102, 241, 0.04);
+    }
+    .upload-icon {
+      width: 48px;
+      height: 48px;
+      max-width: 48px;
+      max-height: 48px;
+      display: block;
+      margin: 0 auto 12px auto;
+      color: #64748b;
+    }
+    .upload-prompt {
+      font-size: 14px;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+    .upload-hint {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 4px;
+    }
+
+    /* Form Fields */
+    .form-group {
+      margin-top: 18px;
+    }
+    .form-label {
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: #94a3b8;
+      margin-bottom: 8px;
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 600px) {
+      .form-row { grid-template-columns: 1fr; }
+    }
+    select, input, textarea {
+      width: 100%;
+      background: #0b0f19;
+      border: 1px solid #334155;
+      color: #f1f5f9;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 14px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+    select:focus, input:focus, textarea:focus {
+      border-color: #6366f1;
+    }
+    .badge-static {
+      background: #0b0f19;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 13px;
+      color: #34d399;
+      font-weight: 500;
+    }
+
+    /* Buttons */
+    .btn-primary {
+      width: 100%;
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: #ffffff;
+      border: none;
+      border-radius: 12px;
+      padding: 14px 20px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-top: 20px;
+      box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
+      transition: transform 0.1s, opacity 0.2s;
+    }
+    .btn-primary:hover {
+      opacity: 0.95;
+      transform: translateY(-1px);
+    }
+    .btn-primary:active {
+      transform: translateY(0);
+    }
+    .btn-primary:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .btn-sm {
+      background: #1e293b;
+      border: 1px solid #334155;
+      color: #e2e8f0;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-sm:hover {
+      background: #334155;
+    }
+    .btn-download {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      color: #34d399;
+      text-decoration: none;
+      display: inline-block;
+    }
+    .btn-download:hover {
+      background: rgba(16, 185, 129, 0.25);
+    }
+    .btn-delete {
+      background: rgba(244, 63, 94, 0.15);
+      border: 1px solid rgba(244, 63, 94, 0.35);
+      color: #fb7185;
+    }
+    .btn-delete:hover {
+      background: rgba(244, 63, 94, 0.25);
+    }
+
+    /* Result Box */
+    .result-box {
+      margin-top: 20px;
+      background: #0b0f19;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 16px;
+    }
+    .result-header {
+      color: #34d399;
+      font-weight: 700;
+      font-size: 14px;
+      margin-bottom: 10px;
+    }
+    .result-item {
+      font-size: 12px;
+      color: #cbd5e1;
+      margin-bottom: 4px;
+    }
+    .result-item strong {
+      color: #94a3b8;
+    }
+
+    /* Assignment Samples List */
+    .sample-item {
+      background: #0b0f19;
+      border: 1px solid #1e293b;
+      border-radius: 10px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .sample-name {
+      font-size: 14px;
+      font-weight: 600;
+      color: #e2e8f0;
+    }
+    .sample-size {
+      font-size: 11px;
+      color: #64748b;
+    }
+
+    /* Table */
+    .table-responsive {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+    th {
+      background: #0b0f19;
+      color: #94a3b8;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 12px 14px;
+      border-bottom: 1px solid #1e293b;
+    }
+    td {
+      padding: 14px;
+      border-bottom: 1px solid #1e293b;
+      color: #cbd5e1;
+    }
+    tr:hover td {
+      background: rgba(15, 23, 42, 0.4);
+    }
+
+    /* Spinner */
+    .spinner {
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: #6366f1;
+      border-radius: 50%;
+      width: 32px;
+      height: 32px;
+      animation: spin 0.8s linear infinite;
+      margin: 0 auto 12px;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Benchmark Result Grid */
+    .bench-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    @media (max-width: 700px) {
+      .bench-grid { grid-template-columns: 1fr; }
+    }
+    .bench-card {
+      background: #0b0f19;
+      border: 1px solid #1e293b;
+      border-radius: 12px;
+      padding: 18px;
+    }
+    .bench-card-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .bench-timing {
+      font-size: 24px;
+      font-weight: 800;
+      color: #ffffff;
+      margin: 8px 0;
+    }
   </style>
 </head>
-<body class="bg-slate-950 text-slate-100 min-h-screen">
+<body>
 
-  <!-- Navigation Bar -->
-  <header class="border-b border-slate-800 bg-slate-900/60 backdrop-blur sticky top-0 z-50">
-    <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-amber-500 to-indigo-600 flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
-          CNS
-        </div>
+  <!-- Header -->
+  <header>
+    <div class="header-inner">
+      <div class="brand-wrap">
+        <div class="brand-badge">CNS</div>
         <div>
-          <h1 class="text-lg font-bold text-white leading-tight">Secure File Encryption System</h1>
-          <p class="text-xs text-slate-400">Zero-Knowledge Envelope Encryption with Firebase</p>
+          <div class="brand-title">Secure File Encryption System</div>
+          <div class="brand-subtitle">Zero-Knowledge Envelope Encryption with Firebase</div>
         </div>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-medium">
-          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-          Firebase Spark Free Tier (100% Free)
-        </div>
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        Firebase Spark Free Tier (100% Free)
       </div>
     </div>
   </header>
 
-  <!-- Main Container -->
-  <main class="max-w-7xl mx-auto px-4 py-8">
+  <!-- Main Content -->
+  <main>
 
-    <!-- Top Stats Row -->
-    <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5">
-        <div class="text-slate-400 text-xs uppercase tracking-wider font-semibold">Cloud Database</div>
-        <div class="text-xl font-bold text-white mt-1">Cloud Firestore</div>
-        <div class="text-xs text-emerald-400 mt-1">1 GB Free Storage Quota</div>
+    <!-- Stats Bar -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Cloud Database</div>
+        <div class="stat-val">Cloud Firestore</div>
+        <div class="stat-sub text-emerald">1 GB Free Storage Quota</div>
       </div>
-      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5">
-        <div class="text-slate-400 text-xs uppercase tracking-wider font-semibold">Total Encrypted Files</div>
-        <div id="statTotalFiles" class="text-xl font-bold text-indigo-400 mt-1">0</div>
-        <div class="text-xs text-slate-400 mt-1">Stored securely</div>
+      <div class="stat-card">
+        <div class="stat-label">Total Encrypted Files</div>
+        <div id="statTotalFiles" class="stat-val text-indigo">0</div>
+        <div class="stat-sub text-emerald">Stored securely</div>
       </div>
-      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5">
-        <div class="text-slate-400 text-xs uppercase tracking-wider font-semibold">Total Encrypted Volume</div>
-        <div id="statTotalBytes" class="text-xl font-bold text-amber-400 mt-1">0 KB</div>
-        <div class="text-xs text-slate-400 mt-1">Zero-Knowledge Ciphertext</div>
+      <div class="stat-card">
+        <div class="stat-label">Total Encrypted Volume</div>
+        <div id="statTotalBytes" class="stat-val text-amber">0 KB</div>
+        <div class="stat-sub text-amber">Zero-Knowledge Ciphertext</div>
       </div>
-      <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-5">
-        <div class="text-slate-400 text-xs uppercase tracking-wider font-semibold">Cryptographic Standards</div>
-        <div class="text-sm font-semibold text-slate-200 mt-1">RSA-2048 + AES-256-GCM</div>
-        <div class="text-xs text-cyan-400 mt-1">SHA-256 Checksum Integrity</div>
+      <div class="stat-card">
+        <div class="stat-label">Cryptographic Standard</div>
+        <div class="stat-val" style="font-size: 16px; margin-top: 10px;">RSA-2048 + AES-GCM</div>
+        <div class="stat-sub text-cyan">SHA-256 Checksum Integrity</div>
       </div>
     </div>
 
     <!-- Navigation Tabs -->
-    <div class="flex gap-2 border-b border-slate-800 mb-6">
-      <button onclick="switchTab('upload')" id="tabBtnUpload" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-indigo-500 text-indigo-400">
+    <div class="tabs-nav">
+      <button onclick="switchTab('upload')" id="tabBtnUpload" class="tab-btn active">
         Upload & Encrypt
       </button>
-      <button onclick="switchTab('vault')" id="tabBtnVault" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      <button onclick="switchTab('vault')" id="tabBtnVault" class="tab-btn">
         Cloud Vault Explorer
       </button>
-      <button onclick="switchTab('benchmark')" id="tabBtnBenchmark" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      <button onclick="switchTab('benchmark')" id="tabBtnBenchmark" class="tab-btn">
         CP1 vs CP2 Benchmark
       </button>
-      <button onclick="switchTab('keys')" id="tabBtnKeys" class="tab-btn px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200">
+      <button onclick="switchTab('keys')" id="tabBtnKeys" class="tab-btn">
         RSA Key Manager
       </button>
     </div>
 
     <!-- Tab 1: Upload & Encrypt -->
     <div id="tabUpload" class="tab-content">
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div class="lg:col-span-2 bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-          <h2 class="text-lg font-bold text-white mb-2">Upload & Encrypt File</h2>
-          <p class="text-sm text-slate-400 mb-6">Select a file. It will be encrypted locally with high-speed authenticated encryption before being stored in Firebase.</p>
+      <div class="grid-2col">
+        <div class="panel">
+          <h2 class="panel-title">Upload & Encrypt File</h2>
+          <p class="panel-desc">Select any file. It is encrypted client-side using authenticated encryption before being uploaded to Firebase.</p>
 
-          <form id="uploadForm" onsubmit="handleUpload(event)" class="space-y-5">
-            <div>
-              <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Choose File</label>
-              <div class="border-2 border-dashed border-slate-700 hover:border-indigo-500 transition-colors rounded-xl p-8 text-center bg-slate-950/50 cursor-pointer" onclick="document.getElementById('fileInput').click()">
-                <input type="file" id="fileInput" class="hidden" onchange="updateFileName(this)" />
-                <svg class="w-10 h-10 mx-auto text-slate-500 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
-                <div id="selectedFileName" class="text-sm text-slate-300 font-medium">Click or drag & drop a file here</div>
-                <div class="text-xs text-slate-500 mt-1">Supports any file size (auto-chunked)</div>
-              </div>
+          <form id="uploadForm" onsubmit="handleUpload(event)">
+            <label class="form-label">Select File to Encrypt</label>
+            <div class="upload-zone" onclick="document.getElementById('fileInput').click()">
+              <input type="file" id="fileInput" style="display: none;" onchange="updateFileName(this)" />
+              <svg class="upload-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" width="48" height="48">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
+              </svg>
+              <div id="selectedFileName" class="upload-prompt">Click or drag & drop a file here</div>
+              <div class="upload-hint">Supports any file size (automatic subcollection chunking)</div>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div class="form-row form-group">
               <div>
-                <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Encryption Protocol</label>
-                <select id="protocolSelect" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500">
+                <label class="form-label">Encryption Protocol</label>
+                <select id="protocolSelect">
                   <option value="CP2">Protocol 2 (CP2): Hybrid AES-256-GCM + RSA (Recommended)</option>
                   <option value="CP1">Protocol 1 (CP1): Pure RSA Asymmetric Chunked</option>
                 </select>
               </div>
               <div>
-                <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Target Storage</label>
-                <div class="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2.5 text-sm text-emerald-400">
-                  Firebase Cloud Firestore (100% Free)
-                </div>
+                <label class="form-label">Cloud Target</label>
+                <div class="badge-static">Firebase Cloud Firestore (100% Free)</div>
               </div>
             </div>
 
-            <button type="submit" id="uploadBtn" class="w-full py-3 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-500 hover:to-indigo-600 text-white font-medium rounded-xl shadow-lg shadow-indigo-600/30 transition-all">
+            <button type="submit" id="uploadBtn" class="btn-primary">
               Encrypt & Upload to Cloud Vault
             </button>
           </form>
 
-          <div id="uploadResult" class="hidden mt-6 p-4 rounded-xl bg-slate-950 border border-slate-800"></div>
+          <div id="uploadResult" class="result-box hidden"></div>
         </div>
 
-        <!-- Quick Sample Files -->
-        <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-          <h3 class="text-sm font-bold text-white uppercase tracking-wider mb-4">Assignment Test Files</h3>
-          <p class="text-xs text-slate-400 mb-4">Original benchmark files located in <code class="text-indigo-300">NSProgrammingAssignment2/</code>:</p>
-          <div class="space-y-3">
-            <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 flex justify-between items-center">
-              <div>
-                <div class="text-sm font-medium text-slate-200">smallFile.txt</div>
-                <div class="text-xs text-slate-500">1.18 KB</div>
-              </div>
-              <button onclick="benchmarkSample('smallFile.txt')" class="px-2.5 py-1 text-xs bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 rounded hover:bg-indigo-600/30">Benchmark</button>
+        <!-- Sample Benchmark Files -->
+        <div class="panel">
+          <h3 class="panel-title" style="font-size: 15px;">Assignment Test Files</h3>
+          <p class="panel-desc">Original benchmark files located in <code>NSProgrammingAssignment2/</code>:</p>
+          
+          <div class="sample-item">
+            <div>
+              <div class="sample-name">smallFile.txt</div>
+              <div class="sample-size">1.18 KB</div>
             </div>
-            <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 flex justify-between items-center">
-              <div>
-                <div class="text-sm font-medium text-slate-200">medianFile.txt</div>
-                <div class="text-xs text-slate-500">1.54 MB</div>
-              </div>
-              <button onclick="benchmarkSample('medianFile.txt')" class="px-2.5 py-1 text-xs bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 rounded hover:bg-indigo-600/30">Benchmark</button>
+            <button onclick="benchmarkSample('smallFile.txt')" class="btn-sm">Benchmark</button>
+          </div>
+
+          <div class="sample-item">
+            <div>
+              <div class="sample-name">medianFile.txt</div>
+              <div class="sample-size">1.54 MB</div>
             </div>
-            <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 flex justify-between items-center">
-              <div>
-                <div class="text-sm font-medium text-slate-200">largeFile.txt</div>
-                <div class="text-xs text-slate-500">3.45 MB</div>
-              </div>
-              <button onclick="benchmarkSample('largeFile.txt')" class="px-2.5 py-1 text-xs bg-indigo-600/20 text-indigo-400 border border-indigo-500/30 rounded hover:bg-indigo-600/30">Benchmark</button>
+            <button onclick="benchmarkSample('medianFile.txt')" class="btn-sm">Benchmark</button>
+          </div>
+
+          <div class="sample-item">
+            <div>
+              <div class="sample-name">largeFile.txt</div>
+              <div class="sample-size">3.45 MB</div>
             </div>
+            <button onclick="benchmarkSample('largeFile.txt')" class="btn-sm">Benchmark</button>
           </div>
         </div>
       </div>
@@ -295,32 +734,30 @@ def serve_ui():
 
     <!-- Tab 2: Cloud Vault Explorer -->
     <div id="tabVault" class="tab-content hidden">
-      <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-6">
+      <div class="panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <div>
-            <h2 class="text-lg font-bold text-white">Firebase Encrypted Vault</h2>
-            <p class="text-sm text-slate-400">All files are stored as encrypted ciphertext. Only someone with your RSA Private Key can decrypt them.</p>
+            <h2 class="panel-title">Firebase Encrypted Vault</h2>
+            <p class="panel-desc" style="margin-bottom: 0;">All files are stored as encrypted ciphertext. Only your RSA Private Key can decrypt them.</p>
           </div>
-          <button onclick="loadVaultFiles()" class="px-3 py-1.5 text-xs bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700">
-            Refresh List
-          </button>
+          <button onclick="loadVaultFiles()" class="btn-sm">Refresh List</button>
         </div>
 
-        <div class="overflow-x-auto">
-          <table class="w-full text-left text-sm">
-            <thead class="text-xs uppercase bg-slate-950/60 text-slate-400 border-b border-slate-800">
+        <div class="table-responsive">
+          <table>
+            <thead>
               <tr>
-                <th class="p-3">File Name</th>
-                <th class="p-3">Protocol</th>
-                <th class="p-3">Plain Size</th>
-                <th class="p-3">Cipher Size</th>
-                <th class="p-3">SHA-256 Digest</th>
-                <th class="p-3">Uploaded At</th>
-                <th class="p-3 text-right">Actions</th>
+                <th>File Name</th>
+                <th>Protocol</th>
+                <th>Original Size</th>
+                <th>Encrypted Size</th>
+                <th>SHA-256 Digest</th>
+                <th>Uploaded At</th>
+                <th style="text-align: right;">Actions</th>
               </tr>
             </thead>
-            <tbody id="vaultTableBody" class="divide-y border-slate-800">
-              <tr><td colspan="7" class="p-6 text-center text-slate-500">Loading files...</td></tr>
+            <tbody id="vaultTableBody">
+              <tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading files from Firebase...</td></tr>
             </tbody>
           </table>
         </div>
@@ -329,24 +766,18 @@ def serve_ui():
 
     <!-- Tab 3: Benchmark -->
     <div id="tabBenchmark" class="tab-content hidden">
-      <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6 mb-6">
-        <h2 class="text-lg font-bold text-white mb-2">Cryptographic Protocol Benchmark</h2>
-        <p class="text-sm text-slate-400 mb-6">Empirical comparison between <strong>Protocol 1 (Pure RSA Chunked)</strong> and <strong>Protocol 2 (Hybrid AES+RSA)</strong>.</p>
+      <div class="panel">
+        <h2 class="panel-title">Cryptographic Protocol Benchmark</h2>
+        <p class="panel-desc">Empirical comparison between <strong>Protocol 1 (Pure RSA Chunked)</strong> and <strong>Protocol 2 (Hybrid AES+RSA)</strong>.</p>
 
-        <div class="flex gap-3 mb-6">
-          <button onclick="benchmarkSample('smallFile.txt')" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-sm font-medium text-slate-200">
-            Benchmark smallFile.txt (1.2 KB)
-          </button>
-          <button onclick="benchmarkSample('medianFile.txt')" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-sm font-medium text-slate-200">
-            Benchmark medianFile.txt (1.5 MB)
-          </button>
-          <button onclick="benchmarkSample('largeFile.txt')" class="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl text-sm font-medium text-slate-200">
-            Benchmark largeFile.txt (3.4 MB)
-          </button>
+        <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+          <button onclick="benchmarkSample('smallFile.txt')" class="btn-sm">Benchmark smallFile.txt (1.2 KB)</button>
+          <button onclick="benchmarkSample('medianFile.txt')" class="btn-sm">Benchmark medianFile.txt (1.5 MB)</button>
+          <button onclick="benchmarkSample('largeFile.txt')" class="btn-sm">Benchmark largeFile.txt (3.4 MB)</button>
         </div>
 
-        <div id="benchmarkLoading" class="hidden p-6 text-center text-slate-400">
-          <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500 mb-3"></div>
+        <div id="benchmarkLoading" class="hidden" style="text-align: center; padding: 32px; color: #94a3b8;">
+          <div class="spinner"></div>
           <div>Running encryption and decryption trials...</div>
         </div>
 
@@ -356,25 +787,25 @@ def serve_ui():
 
     <!-- Tab 4: Keys -->
     <div id="tabKeys" class="tab-content hidden">
-      <div class="bg-slate-900/80 border border-slate-800 rounded-2xl p-6">
-        <div class="flex items-center justify-between mb-4">
+      <div class="panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <div>
-            <h2 class="text-lg font-bold text-white">RSA-2048 Asymmetric Key Pair</h2>
-            <p class="text-sm text-slate-400">Used for envelope encryption (encrypting symmetric AES keys) and authentication.</p>
+            <h2 class="panel-title">RSA-2048 Asymmetric Key Pair</h2>
+            <p class="panel-desc" style="margin-bottom: 0;">Used for envelope encryption (encrypting symmetric AES keys) and authentication.</p>
           </div>
-          <button onclick="generateNewKeys()" class="px-4 py-2 bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-500/30 rounded-xl text-xs font-semibold">
+          <button onclick="generateNewKeys()" class="btn-sm" style="background: rgba(244, 63, 94, 0.15); border-color: rgba(244, 63, 94, 0.35); color: #fb7185;">
             Generate New Keypair
           </button>
         </div>
 
-        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        <div class="form-row" style="margin-top: 16px;">
           <div>
-            <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Public Key (SubjectPublicKeyInfo PEM)</label>
-            <textarea id="pubKeyArea" readonly class="w-full h-64 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-indigo-300 font-mono focus:outline-none"></textarea>
+            <label class="form-label">Public Key (SubjectPublicKeyInfo PEM)</label>
+            <textarea id="pubKeyArea" readonly rows="12" style="color: #818cf8;"></textarea>
           </div>
           <div>
-            <label class="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-2">Private Key (PKCS#8 PEM - KEEP SECRET)</label>
-            <textarea id="privKeyArea" readonly class="w-full h-64 bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-rose-300 font-mono focus:outline-none"></textarea>
+            <label class="form-label">Private Key (PKCS#8 PEM - KEEP SECRET)</label>
+            <textarea id="privKeyArea" readonly rows="12" style="color: #fb7185;"></textarea>
           </div>
         </div>
       </div>
@@ -385,17 +816,13 @@ def serve_ui():
   <script>
     function switchTab(tabId) {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-      document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('border-indigo-500', 'text-indigo-400');
-        btn.classList.add('border-transparent', 'text-slate-400');
-      });
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
 
       const targetTab = document.getElementById('tab' + tabId.charAt(0).toUpperCase() + tabId.slice(1));
       const targetBtn = document.getElementById('tabBtn' + tabId.charAt(0).toUpperCase() + tabId.slice(1));
       if (targetTab && targetBtn) {
         targetTab.classList.remove('hidden');
-        targetBtn.classList.add('border-indigo-500', 'text-indigo-400');
-        targetBtn.classList.remove('border-transparent', 'text-slate-400');
+        targetBtn.classList.add('active');
       }
 
       if (tabId === 'vault') loadVaultFiles();
@@ -481,15 +908,13 @@ def serve_ui():
         const resDiv = document.getElementById('uploadResult');
         resDiv.classList.remove('hidden');
         resDiv.innerHTML = `
-          <div class="text-sm font-semibold text-emerald-400 mb-2">✔ File Successfully Encrypted and Stored in Firebase!</div>
-          <div class="text-xs text-slate-300 space-y-1 font-mono">
-            <div><strong class="text-slate-400">File ID:</strong> ${data.file_id}</div>
-            <div><strong class="text-slate-400">Protocol:</strong> ${data.protocol}</div>
-            <div><strong class="text-slate-400">Original Size:</strong> ${data.original_size_bytes} bytes</div>
-            <div><strong class="text-slate-400">Encrypted Size:</strong> ${data.encrypted_size_bytes} bytes</div>
-            <div><strong class="text-slate-400">SHA-256 Digest:</strong> ${data.sha256}</div>
-            <div><strong class="text-slate-400">Encryption Time:</strong> ${data.encrypt_time_ms} ms</div>
-          </div>
+          <div class="result-header">✔ File Successfully Encrypted and Stored in Firebase!</div>
+          <div class="result-item"><strong>File ID:</strong> ${data.file_id}</div>
+          <div class="result-item"><strong>Protocol:</strong> ${data.protocol}</div>
+          <div class="result-item"><strong>Original Size:</strong> ${data.original_size_bytes} bytes</div>
+          <div class="result-item"><strong>Encrypted Size:</strong> ${data.encrypted_size_bytes} bytes</div>
+          <div class="result-item"><strong>SHA-256 Digest:</strong> ${data.sha256}</div>
+          <div class="result-item"><strong>Encryption Time:</strong> ${data.encrypt_time_ms} ms</div>
         `;
         loadStats();
       } catch (err) {
@@ -502,35 +927,35 @@ def serve_ui():
 
     async function loadVaultFiles() {
       const tbody = document.getElementById('vaultTableBody');
-      tbody.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-slate-500">Fetching files from Firestore...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Fetching files from Firestore...</td></tr>';
       try {
         const res = await fetch('/api/files');
         const files = await res.json();
         if (!files.length) {
-          tbody.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-slate-500">No files found in Firebase Vault.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">No files found in Firebase Vault.</td></tr>';
           return;
         }
 
         tbody.innerHTML = files.map(f => `
-          <tr class="hover:bg-slate-900/40">
-            <td class="p-3 font-medium text-slate-200">${f.file_name}</td>
-            <td class="p-3 text-xs text-indigo-400">${f.protocol ? f.protocol.split(' ')[0] : 'CP2'}</td>
-            <td class="p-3 text-xs text-slate-400">${(f.original_size_bytes / 1024).toFixed(1)} KB</td>
-            <td class="p-3 text-xs text-amber-400">${(f.encrypted_size_bytes / 1024).toFixed(1)} KB</td>
-            <td class="p-3 text-xs font-mono text-slate-500" title="${f.sha256}">${f.sha256 ? f.sha256.substring(0, 12) + '...' : '-'}</td>
-            <td class="p-3 text-xs text-slate-400">${f.uploaded_at || '-'}</td>
-            <td class="p-3 text-right space-x-2">
-              <a href="/api/download/${f.file_id}" target="_blank" class="px-2.5 py-1 text-xs bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 rounded hover:bg-emerald-600/30 inline-block">
+          <tr>
+            <td style="font-weight: 600; color: #f1f5f9;">${f.file_name}</td>
+            <td style="color: #818cf8; font-size: 12px;">${f.protocol ? f.protocol.split(' ')[0] : 'CP2'}</td>
+            <td style="color: #94a3b8; font-size: 12px;">${(f.original_size_bytes / 1024).toFixed(1)} KB</td>
+            <td style="color: #fbbf24; font-size: 12px;">${(f.encrypted_size_bytes / 1024).toFixed(1)} KB</td>
+            <td style="font-family: monospace; font-size: 11px; color: #64748b;" title="${f.sha256}">${f.sha256 ? f.sha256.substring(0, 12) + '...' : '-'}</td>
+            <td style="color: #94a3b8; font-size: 12px;">${f.uploaded_at || '-'}</td>
+            <td style="text-align: right;">
+              <a href="/api/download/${f.file_id}" target="_blank" class="btn-sm btn-download" style="margin-right: 6px;">
                 Decrypt & Download
               </a>
-              <button onclick="deleteFile('${f.file_id}')" class="px-2.5 py-1 text-xs bg-rose-600/20 text-rose-400 border border-rose-500/30 rounded hover:bg-rose-600/30">
+              <button onclick="deleteFile('${f.file_id}')" class="btn-sm btn-delete">
                 Delete
               </button>
             </td>
           </tr>
         `).join('');
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="7" class="p-6 text-center text-rose-400">Failed to load files from Firebase.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #fb7185; padding: 24px;">Failed to load files from Firebase.</td></tr>';
       }
     }
 
@@ -562,24 +987,24 @@ def serve_ui():
         let cp1Html = '';
         if (cp1.skipped) {
           cp1Html = `
-            <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
-              <div class="text-xs uppercase font-semibold text-rose-400">CP1 Pure RSA Chunked</div>
-              <div class="text-sm font-bold text-slate-300 mt-2">SKIPPED</div>
-              <div class="text-xs text-slate-400 mt-2">${cp1.reason}</div>
+            <div class="bench-card">
+              <div class="bench-card-title" style="color: #fb7185;">CP1 Pure RSA Chunked</div>
+              <div class="bench-timing" style="font-size: 18px; color: #cbd5e1;">SKIPPED</div>
+              <div style="font-size: 12px; color: #94a3b8; line-height: 1.4;">${cp1.reason}</div>
             </div>
           `;
         } else {
           const speedup = (cp1.total_time_ms / Math.max(cp2.total_time_ms, 0.01)).toFixed(1);
           cp1Html = `
-            <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
-              <div class="text-xs uppercase font-semibold text-amber-400">CP1 Pure RSA Chunked</div>
-              <div class="text-xl font-bold text-white mt-1">${cp1.total_time_ms} ms</div>
-              <div class="text-xs text-slate-400 mt-2 space-y-1">
+            <div class="bench-card">
+              <div class="bench-card-title" style="color: #fbbf24;">CP1 Pure RSA Chunked</div>
+              <div class="bench-timing">${cp1.total_time_ms} ms</div>
+              <div style="font-size: 12px; color: #94a3b8; line-height: 1.6;">
                 <div>Encrypt: <strong>${cp1.encrypt_time_ms} ms</strong></div>
                 <div>Decrypt: <strong>${cp1.decrypt_time_ms} ms</strong></div>
-                <div>Integrity: <span class="text-emerald-400 font-bold">${cp1.verified ? 'VERIFIED' : 'FAILED'}</span></div>
+                <div>Integrity: <span style="color: #34d399; font-weight: 700;">${cp1.verified ? 'VERIFIED' : 'FAILED'}</span></div>
               </div>
-              <div class="mt-3 text-xs font-semibold text-indigo-400">
+              <div style="margin-top: 10px; font-size: 12px; font-weight: 700; color: #818cf8;">
                 AES-Hybrid is ${speedup}x FASTER
               </div>
             </div>
@@ -587,17 +1012,17 @@ def serve_ui():
         }
 
         resultsDiv.innerHTML = `
-          <h3 class="text-md font-bold text-white mb-4">Results for ${data.file_name} (${(data.file_size_bytes / 1024).toFixed(1)} KB)</h3>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div class="p-4 bg-slate-950 border border-slate-800 rounded-xl">
-              <div class="text-xs uppercase font-semibold text-emerald-400">CP2 Hybrid (AES-256-GCM + RSA)</div>
-              <div class="text-xl font-bold text-white mt-1">${cp2.total_time_ms} ms</div>
-              <div class="text-xs text-slate-400 mt-2 space-y-1">
+          <h3 style="font-size: 15px; font-weight: 700; color: #ffffff; margin-bottom: 12px;">Results for ${data.file_name} (${(data.file_size_bytes / 1024).toFixed(1)} KB)</h3>
+          <div class="bench-grid">
+            <div class="bench-card">
+              <div class="bench-card-title" style="color: #34d399;">CP2 Hybrid (AES-256-GCM + RSA)</div>
+              <div class="bench-timing">${cp2.total_time_ms} ms</div>
+              <div style="font-size: 12px; color: #94a3b8; line-height: 1.6;">
                 <div>Encrypt: <strong>${cp2.encrypt_time_ms} ms</strong></div>
                 <div>Decrypt: <strong>${cp2.decrypt_time_ms} ms</strong></div>
-                <div>Integrity: <span class="text-emerald-400 font-bold">${cp2.verified ? 'VERIFIED' : 'FAILED'}</span></div>
+                <div>Integrity: <span style="color: #34d399; font-weight: 700;">${cp2.verified ? 'VERIFIED' : 'FAILED'}</span></div>
               </div>
-              <div class="mt-3 text-xs font-semibold text-emerald-400">
+              <div style="margin-top: 10px; font-size: 12px; font-weight: 700; color: #34d399;">
                 Optimal for large cloud storage
               </div>
             </div>
@@ -614,8 +1039,7 @@ def serve_ui():
     loadStats();
   </script>
 </body>
-</html>
-    """
+</html>"""
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
