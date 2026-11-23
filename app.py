@@ -12,9 +12,11 @@ import os
 import io
 import time
 from typing import Optional
+import os
 from fastapi import FastAPI, File, UploadFile, Form, Header, HTTPException, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
@@ -23,6 +25,11 @@ from firebase_vault import FirebaseCloudVault
 from auth_manager import AuthManager
 
 app = FastAPI(title="CNS Multi-Tenant File Encryption System")
+
+# Mount static assets directory (logos, posters, wallpapers)
+assets_dir = os.path.join(os.path.dirname(__file__), "assets")
+if os.path.exists(assets_dir):
+    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
 app.add_middleware(
     CORSMiddleware,
@@ -221,6 +228,7 @@ def serve_ui():
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CNS Multi-Tenant Secure File Encryption System</title>
+  <link rel="icon" type="image/png" href="/assets/logo.png" />
   
   <!-- Firebase App & Auth SDK (For Google Sign-In) -->
   <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -234,23 +242,46 @@ def serve_ui():
     }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-      background-color: #0b0f19;
+      background-color: #060913;
       color: #e2e8f0;
       line-height: 1.5;
       min-height: 100vh;
+      position: relative;
+      overflow-x: hidden;
       -webkit-font-smoothing: antialiased;
     }
     code, pre, textarea {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
+    /* Fixed Wallpaper & Vignette for Home Page */
+    .home-bg-wallpaper {
+      position: fixed;
+      inset: 0;
+      background: url('/assets/Secure%20File%20Encryption%20Wallpaper.png') no-repeat center top fixed;
+      background-size: cover;
+      opacity: 0.16;
+      filter: saturate(1.2) brightness(0.92);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .home-bg-vignette {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(ellipse at top, rgba(6, 9, 19, 0.25) 0%, rgba(6, 9, 19, 0.82) 65%, #060913 100%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
     header {
-      background: rgba(17, 24, 39, 0.9);
-      backdrop-filter: blur(8px);
-      border-bottom: 1px solid #1e293b;
       position: sticky;
       top: 0;
       z-index: 50;
+      background: rgba(13, 19, 33, 0.85);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border-bottom: 1px solid rgba(51, 65, 85, 0.6);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
     }
     .header-inner {
       max-width: 1240px;
@@ -259,24 +290,21 @@ def serve_ui():
       display: flex;
       align-items: center;
       justify-content: space-between;
+      position: relative;
+      z-index: 1;
     }
     .brand-wrap {
       display: flex;
       align-items: center;
       gap: 12px;
     }
-    .brand-badge {
+    .header-brand-logo {
       width: 42px;
       height: 42px;
-      border-radius: 12px;
-      background: linear-gradient(135deg, #f59e0b, #6366f1);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-weight: 800;
-      color: #ffffff;
-      font-size: 16px;
-      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35);
+      border-radius: 10px;
+      object-fit: cover;
+      border: 1.5px solid rgba(99, 102, 241, 0.4);
+      box-shadow: 0 0 18px rgba(99, 102, 241, 0.35);
     }
     .brand-title {
       font-size: 18px;
@@ -324,28 +352,64 @@ def serve_ui():
       max-width: 1240px;
       margin: 0 auto;
       padding: 28px 20px 48px;
+      position: relative;
+      z-index: 1;
     }
 
-    /* Auth Overlay Modal */
+    /* Auth Overlay Modal with Faded Emblem Poster Background */
     .auth-overlay {
       position: fixed;
       inset: 0;
-      background: rgba(11, 15, 25, 0.95);
-      backdrop-filter: blur(10px);
+      background-color: #060913;
       display: flex;
       align-items: center;
       justify-content: center;
-      z-index: 100;
+      z-index: 1000;
       padding: 20px;
+      overflow-y: auto;
+    }
+    .auth-bg-overlay {
+      position: fixed;
+      inset: 0;
+      background: url('/assets/SFES%20Cybersecurity%20Emblem%20Poster.png') no-repeat center center;
+      background-size: cover;
+      opacity: 0.24;
+      filter: saturate(1.25) contrast(1.1);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .auth-vignette-overlay {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle at center, rgba(6, 9, 19, 0.45) 0%, rgba(6, 9, 19, 0.88) 65%, #060913 100%);
+      pointer-events: none;
+      z-index: 1;
     }
     .auth-card {
-      background: #111827;
-      border: 1px solid #1e293b;
-      border-radius: 20px;
-      padding: 32px;
+      position: relative;
+      z-index: 2;
+      background: rgba(13, 19, 33, 0.88);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(99, 102, 241, 0.32);
+      border-radius: 24px;
+      padding: 34px 36px;
       max-width: 440px;
       width: 100%;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+      box-shadow: 
+        0 25px 60px -12px rgba(0, 0, 0, 0.95),
+        0 0 45px rgba(99, 102, 241, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    }
+    .auth-brand-logo {
+      display: block;
+      margin: 0 auto 14px;
+      width: 68px;
+      height: 68px;
+      border-radius: 16px;
+      object-fit: cover;
+      border: 1.5px solid rgba(99, 102, 241, 0.45);
+      box-shadow: 0 0 28px rgba(99, 102, 241, 0.45);
     }
 
     /* Provider Selector */
@@ -353,7 +417,7 @@ def serve_ui():
       display: flex;
       justify-content: center;
       gap: 12px;
-      margin-bottom: 20px;
+      margin-bottom: 22px;
     }
     .provider-btn {
       flex: 1;
@@ -361,7 +425,7 @@ def serve_ui():
       align-items: center;
       justify-content: center;
       gap: 8px;
-      padding: 10px 16px;
+      padding: 11px 16px;
       border-radius: 12px;
       background: #0b0f19;
       border: 1px solid #334155;
@@ -380,50 +444,9 @@ def serve_ui():
       background: rgba(99, 102, 241, 0.15);
       border-color: #6366f1;
       color: #818cf8;
-      box-shadow: 0 0 12px rgba(99, 102, 241, 0.25);
+      box-shadow: 0 0 14px rgba(99, 102, 241, 0.3);
     }
-
-    .btn-google-prominent {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      background: #ffffff;
-      color: #1f2937;
-      border: 1px solid #e5e7eb;
-      border-radius: 12px;
-      padding: 12px 18px;
-      font-size: 14px;
-      font-weight: 700;
-      cursor: pointer;
-      transition: all 0.2s;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-    }
-    .btn-google-prominent:hover {
-      background: #f9fafb;
-      box-shadow: 0 4px 14px rgba(0,0,0,0.3);
-      transform: translateY(-1px);
-    }
-
-    .auth-divider {
-      display: flex;
-      align-items: center;
-      text-align: center;
-      margin: 20px 0;
-      color: #64748b;
-      font-size: 12px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .auth-divider::before, .auth-divider::after {
-      content: '';
-      flex: 1;
-      border-bottom: 1px solid #1e293b;
-    }
-    .auth-divider::before { margin-right: 12px; }
-    .auth-divider::after { margin-left: 12px; }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
 
     .auth-tabs {
       display: flex;
@@ -755,16 +778,22 @@ def serve_ui():
 </head>
 <body>
 
-  <!-- Auth Modal Overlay -->
+  <!-- Fixed Cyber Wallpaper & Vignette for Home Page (After Login) -->
+  <div class="home-bg-wallpaper"></div>
+  <div class="home-bg-vignette"></div>
+
+  <!-- Auth Modal Overlay with Faded Emblem Poster Background -->
   <div id="authOverlay" class="auth-overlay">
+    <div class="auth-bg-overlay"></div>
+    <div class="auth-vignette-overlay"></div>
     <div class="auth-card">
-      <div style="text-align: center; margin-bottom: 20px;">
-        <div class="brand-badge" style="margin: 0 auto 12px; width: 48px; height: 48px; font-size: 20px;">CNS</div>
-        <h2 style="font-size: 20px; font-weight: 800; color: #fff;">Secure Vault Access</h2>
-        <p style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Zero-Knowledge Multi-Tenant Encrypted Storage</p>
+      <div style="text-align: center; margin-bottom: 22px;">
+        <img src="/assets/logo.png" alt="SFES Logo" class="auth-brand-logo" />
+        <h2 style="font-size: 22px; font-weight: 800; color: #fff; letter-spacing: -0.01em;">Secure Vault Access</h2>
+        <p style="font-size: 13px; color: #94a3b8; margin-top: 5px;">Zero-Knowledge Multi-Tenant Encrypted Storage</p>
       </div>
 
-      <!-- Provider Selector: Email (Default) vs Google -->
+      <!-- Provider Selector: Email & Password (Default) vs Google -->
       <div class="provider-selector">
         <button type="button" class="provider-btn active" id="btnProviderEmail" onclick="selectProvider('email')">
           <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="18" height="18">
@@ -784,21 +813,6 @@ def serve_ui():
       </div>
 
       <div id="authError" class="auth-error"></div>
-
-      <!-- Quick One-Click Google Button -->
-      <div>
-        <button type="button" onclick="handleGoogleSignIn()" class="btn-google-prominent">
-          <svg viewBox="0 0 24 24" width="18" height="18">
-            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
-            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
-            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
-            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
-          </svg>
-          Sign in with Google Account
-        </button>
-      </div>
-
-      <div class="auth-divider">or enter with email</div>
 
       <!-- Email / Password Section -->
       <div id="emailAuthSection">
@@ -826,8 +840,12 @@ def serve_ui():
   <header>
     <div class="header-inner">
       <div class="brand-wrap">
-        <div class="brand-badge">CNS</div>
+        <img src="/assets/logo.png" alt="SFES Logo" class="header-brand-logo" />
         <div>
+          <div class="brand-title">Secure File Encryption System</div>
+          <div class="brand-subtitle">Multi-Tenant Zero-Knowledge Cloud Vault</div>
+        </div>
+      </div>
           <div class="brand-title">Secure File Encryption System</div>
           <div class="brand-subtitle">Multi-Tenant Zero-Knowledge Cloud Vault</div>
         </div>
@@ -1061,6 +1079,16 @@ def serve_ui():
       const errorDiv = document.getElementById('authError');
       errorDiv.style.display = 'none';
 
+      const googleBtn = document.getElementById('btnProviderGoogle');
+      const originalHtml = googleBtn.innerHTML;
+      googleBtn.innerHTML = `
+        <svg style="animation: spin 1s linear infinite;" viewBox="0 0 24 24" width="18" height="18">
+          <circle cx="12" cy="12" r="10" stroke="#818cf8" stroke-width="3" fill="none" stroke-dasharray="31.4 31.4" />
+        </svg>
+        Connecting...
+      `;
+      googleBtn.disabled = true;
+
       try {
         if (typeof firebase === 'undefined') {
           throw new Error('Firebase client SDK failed to load. Please verify your internet connection.');
@@ -1086,9 +1114,11 @@ def serve_ui():
         localStorage.setItem('cns_email', data.email);
         localStorage.setItem('cns_uid', data.uid);
 
-        document.getElementById('authOverlay').style.display = 'none';
-        initUserSession();
+        // Auto-reload to immediately initialize fresh user session without leaving previous data
+        window.location.reload();
       } catch (err) {
+        googleBtn.innerHTML = originalHtml;
+        googleBtn.disabled = false;
         if (err.code === 'auth/popup-closed-by-user') {
           return; // User canceled popup
         }
@@ -1149,8 +1179,8 @@ def serve_ui():
         localStorage.setItem('cns_email', data.email);
         localStorage.setItem('cns_uid', data.uid);
 
-        document.getElementById('authOverlay').style.display = 'none';
-        initUserSession();
+        // Auto-reload into new user session immediately
+        window.location.reload();
       } catch (err) {
         errorDiv.innerText = err.message;
         errorDiv.style.display = 'block';
@@ -1168,11 +1198,37 @@ def serve_ui():
       if (typeof firebase !== 'undefined' && firebase.auth) {
         firebase.auth().signOut().catch(() => {});
       }
-      document.getElementById('authOverlay').style.display = 'flex';
-      document.getElementById('userEmailSpan').innerText = 'Not signed in';
+      // Force page reload so all memory, tables, and cached upload results are wiped clean!
+      window.location.reload();
+    }
+
+    function clearPreviousSessionUI() {
+      const resDiv = document.getElementById('uploadResult');
+      if (resDiv) {
+        resDiv.classList.add('hidden');
+        resDiv.innerHTML = '';
+      }
+      const fileInput = document.getElementById('fileInput');
+      if (fileInput) fileInput.value = '';
+      const selectedFileName = document.getElementById('selectedFileName');
+      if (selectedFileName) selectedFileName.innerText = 'Click or drag file here';
+      
+      const statTotalFiles = document.getElementById('statTotalFiles');
+      if (statTotalFiles) statTotalFiles.innerText = '0';
+      const statTotalBytes = document.getElementById('statTotalBytes');
+      if (statTotalBytes) statTotalBytes.innerText = '0 KB';
+      
+      const tbody = document.getElementById('vaultTableBody');
+      if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading private vault files...</td></tr>';
+      
+      const pubArea = document.getElementById('pubKeyArea');
+      if (pubArea) pubArea.value = '';
+      const privArea = document.getElementById('privKeyArea');
+      if (privArea) privArea.value = '';
     }
 
     async function initUserSession() {
+      clearPreviousSessionUI();
       const token = localStorage.getItem('cns_id_token');
       if (!token) {
         document.getElementById('authOverlay').style.display = 'flex';
