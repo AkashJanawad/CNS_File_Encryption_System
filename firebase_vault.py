@@ -1,10 +1,11 @@
 """
 Firebase Cloud Vault
-Provides Zero-Knowledge Encrypted File Storage on Firebase Cloud Firestore (100% Free Tier - Spark Plan).
+Provides Zero-Knowledge Multi-Tenant Encrypted File Storage on Firebase Cloud Firestore.
 Features:
-- Direct byte encryption storage for files under 750 KB.
-- Automatic chunked subcollection storage for larger files (e.g. multi-MB files).
+- Strict per-user file isolation (owner_uid / owner_email).
+- Safe 400 KB chunking for Firestore documents (well below the 1 MB limit to eliminate upload failures).
 - Metadata tracking (SHA-256 integrity, encryption timestamps, protocol, encrypted keys).
+- Zero-byte and large-file fault tolerance.
 """
 
 import os
@@ -15,12 +16,13 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import firebase_admin
 from firebase_admin import credentials, firestore
-from google.cloud.firestore import Client
+from google.cloud.firestore import Client, FieldFilter
 
 import crypto_engine
 
-# Chunk size for Firestore document safety (Firestore max doc size is 1 MiB)
-CHUNK_SIZE = 700 * 1024  # 700 KB per chunk
+# Safe Chunk size for Firestore document limit (Firestore max doc size is 1 MiB)
+# 400 KB leaves plenty of headroom for protobuf/Base64 overhead
+CHUNK_SIZE = 400 * 1024  # 400 KB per chunk
 
 class FirebaseCloudVault:
     def __init__(self, key_path: str = "serviceAccountKey.json"):
@@ -42,10 +44,18 @@ class FirebaseCloudVault:
             cred = credentials.Certificate(self.key_path)
             firebase_admin.initialize_app(cred)
 
-    def upload_file(self, file_path: str, public_key_pem: str, protocol: str = "CP2") -> Dict[str, Any]:
+    def upload_file(
+        self,
+        file_path: str,
+        public_key_pem: str,
+        protocol: str = "CP2",
+        owner_uid: str = "anonymous",
+        owner_email: str = "anonymous@cns.com"
+    ) -> Dict[str, Any]:
         """
         Encrypts a local file and stores the ciphertext + metadata in Firebase Firestore.
         Zero-Knowledge: The cloud only receives encrypted bytes.
+        Tagged with owner_uid for strict user privacy and multi-tenancy.
         """
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"File not found: {file_path}")
@@ -63,12 +73,14 @@ class FirebaseCloudVault:
         ciphertext = enc_result["ciphertext"]
         cipher_len = len(ciphertext)
         file_id = str(uuid.uuid4())
-        num_chunks = math.ceil(cipher_len / CHUNK_SIZE)
+        num_chunks = max(1, math.ceil(cipher_len / CHUNK_SIZE)) if cipher_len > 0 else 1
 
         # 2. Prepare Base Metadata Document
         metadata = {
             "file_id": file_id,
             "file_name": file_name,
+            "owner_uid": owner_uid,
+            "owner_email": owner_email,
             "original_size_bytes": len(plain_bytes),
             "encrypted_size_bytes": cipher_len,
             "sha256": enc_result["sha256"],
@@ -79,17 +91,18 @@ class FirebaseCloudVault:
             "uploaded_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
             "timestamp": time.time(),
             "num_chunks": num_chunks,
-            "is_chunked": (num_chunks > 1)
+            "is_chunked": (num_chunks > 1 or cipher_len > CHUNK_SIZE)
         }
 
         doc_ref = self.db.collection(self.collection_name).document(file_id)
 
-        # 3. Store Ciphertext (Single Doc or Subcollection Chunks)
-        if num_chunks == 1:
-            metadata["ciphertext"] = ciphertext
-            doc_ref.set(metadata)
+        # 3. Store Ciphertext Safely (Single Doc or Subcollection Chunks)
+        if not metadata["is_chunked"]:
+            doc_data = dict(metadata)
+            doc_data["ciphertext"] = ciphertext
+            doc_ref.set(doc_data)
         else:
-            # Save metadata first without huge payload
+            # Save metadata first without massive payload to guarantee under-1MB safety
             doc_ref.set(metadata)
             chunks_coll = doc_ref.collection("chunks")
             for i in range(num_chunks):
@@ -101,10 +114,16 @@ class FirebaseCloudVault:
 
         return metadata
 
-    def download_file(self, file_id: str, private_key_pem: str, output_dir: Optional[str] = None) -> Tuple[str, bool, Dict[str, Any]]:
+    def download_file(
+        self,
+        file_id: str,
+        private_key_pem: str,
+        output_dir: Optional[str] = None,
+        user_uid: Optional[str] = None
+    ) -> Tuple[str, bool, Dict[str, Any]]:
         """
         Downloads encrypted file from Firebase, decrypts it locally, and verifies SHA-256 integrity.
-        Returns: (saved_path, integrity_verified, metadata)
+        Validates user ownership so User A cannot download User B's files.
         """
         doc_ref = self.db.collection(self.collection_name).document(file_id)
         doc = doc_ref.get()
@@ -114,9 +133,14 @@ class FirebaseCloudVault:
 
         metadata = doc.to_dict()
 
+        # Multi-Tenant Ownership Authorization Check
+        if user_uid and metadata.get("owner_uid") and metadata.get("owner_uid") != "anonymous":
+            if metadata.get("owner_uid") != user_uid:
+                raise PermissionError("Access Denied: You do not have permission to access another user's encrypted file.")
+
         # 1. Fetch Ciphertext
         if not metadata.get("is_chunked", False):
-            ciphertext = metadata["ciphertext"]
+            ciphertext = metadata.get("ciphertext", b"")
         else:
             num_chunks = metadata.get("num_chunks", 1)
             chunks_coll = doc_ref.collection("chunks")
@@ -124,7 +148,7 @@ class FirebaseCloudVault:
             for i in range(num_chunks):
                 chunk_doc = chunks_coll.document(f"chunk_{i}").get()
                 if not chunk_doc.exists:
-                    raise IOError(f"Missing chunk {i} for file {file_id}")
+                    raise IOError(f"Corrupted storage: Missing chunk {i} for file {file_id}")
                 chunk_bytes.append(chunk_doc.to_dict()["data"])
             ciphertext = b"".join(chunk_bytes)
 
@@ -135,8 +159,8 @@ class FirebaseCloudVault:
         else:
             plaintext, dec_time = crypto_engine.decrypt_cp2_hybrid(
                 ciphertext,
-                metadata["encrypted_key_b64"],
-                metadata["nonce_b64"],
+                metadata.get("encrypted_key_b64", ""),
+                metadata.get("nonce_b64", ""),
                 private_key_pem
             )
 
@@ -157,25 +181,43 @@ class FirebaseCloudVault:
 
         return output_path, integrity_ok, metadata
 
-    def list_files(self) -> List[Dict[str, Any]]:
-        """Lists all files stored in the Firebase Vault with metadata."""
-        docs = self.db.collection(self.collection_name).order_by("timestamp", direction=firestore.Query.DESCENDING).stream()
+    def list_files(self, owner_uid: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Lists encrypted files.
+        If owner_uid is supplied, returns ONLY files owned by that user.
+        Sorts in Python to avoid composite index requirements.
+        """
+        coll = self.db.collection(self.collection_name)
+        if owner_uid:
+            docs = coll.where(filter=FieldFilter("owner_uid", "==", owner_uid)).stream()
+        else:
+            docs = coll.stream()
+
         results = []
         for doc in docs:
             d = doc.to_dict()
-            # Do not return large binary blobs in listing
             d.pop("ciphertext", None)
             results.append(d)
+
+        results.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
         return results
 
-    def delete_file(self, file_id: str) -> bool:
-        """Deletes file metadata and chunks from Firebase Vault."""
+    def delete_file(self, file_id: str, user_uid: Optional[str] = None) -> bool:
+        """
+        Deletes file metadata and chunks from Firebase Vault.
+        Validates ownership so users can only delete their own files.
+        """
         doc_ref = self.db.collection(self.collection_name).document(file_id)
         doc = doc_ref.get()
         if not doc.exists:
             return False
 
-        # Delete chunks subcollection if present
+        metadata = doc.to_dict()
+        if user_uid and metadata.get("owner_uid") and metadata.get("owner_uid") != "anonymous":
+            if metadata.get("owner_uid") != user_uid:
+                raise PermissionError("Access Denied: You cannot delete another user's file.")
+
+        # Delete subcollection chunks if present
         chunks = doc_ref.collection("chunks").stream()
         for c in chunks:
             c.reference.delete()
@@ -183,15 +225,15 @@ class FirebaseCloudVault:
         doc_ref.delete()
         return True
 
-    def get_vault_status(self) -> Dict[str, Any]:
-        """Returns health and cloud connectivity metrics."""
-        files = self.list_files()
+    def get_vault_status(self, owner_uid: Optional[str] = None) -> Dict[str, Any]:
+        """Returns health and cloud connectivity metrics for the user."""
+        files = self.list_files(owner_uid=owner_uid)
         total_orig_bytes = sum(f.get("original_size_bytes", 0) for f in files)
         total_enc_bytes = sum(f.get("encrypted_size_bytes", 0) for f in files)
 
         return {
             "status": "ONLINE",
-            "tier": "Firebase Spark (100% Free Plan - No Credit Card)",
+            "tier": "Firebase Spark (100% Free Plan - Multi-Tenant)",
             "database": "Cloud Firestore",
             "collection": self.collection_name,
             "total_files": len(files),

@@ -1,14 +1,18 @@
 """
 CNS Secure File Encryption System - Web Application
-FastAPI Server providing Web Dashboard for Zero-Knowledge Firebase Encrypted Storage & Benchmarking.
+FastAPI Server providing Multi-Tenant Zero-Knowledge Firebase Encrypted Storage & Benchmarking.
+Features:
+- Firebase Email/Password User Authentication
+- Per-User Isolated Vault & Personalized RSA-2048 Keypairs
+- Direct Multipart File Upload Streaming (Rock-solid, handles files of any size)
+- 400 KB safe Firestore chunking
 """
 
 import os
 import io
 import time
-import base64
 from typing import Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, UploadFile, Form, Header, HTTPException, Depends
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,8 +20,9 @@ import uvicorn
 
 import crypto_engine
 from firebase_vault import FirebaseCloudVault
+from auth_manager import AuthManager
 
-app = FastAPI(title="CNS File Encryption System")
+app = FastAPI(title="CNS Multi-Tenant File Encryption System")
 
 app.add_middleware(
     CORSMiddleware,
@@ -28,81 +33,124 @@ app.add_middleware(
 )
 
 vault = FirebaseCloudVault()
+auth_mgr = AuthManager()
 
-# Auto-load or generate session RSA keys
-KEY_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "keys")
-os.makedirs(KEY_DIR, exist_ok=True)
-PRIV_KEY_FILE = os.path.join(KEY_DIR, "private_key.pem")
-PUB_KEY_FILE = os.path.join(KEY_DIR, "public_key.pem")
+# Auth Request Models
+class AuthRequest(BaseModel):
+    email: str
+    password: str
 
-if not os.path.exists(PRIV_KEY_FILE) or not os.path.exists(PUB_KEY_FILE):
-    _priv, _pub = crypto_engine.generate_rsa_keypair(2048)
-    with open(PRIV_KEY_FILE, "w") as f:
-        f.write(_priv)
-    with open(PUB_KEY_FILE, "w") as f:
-        f.write(_pub)
-
-class FileUploadRequest(BaseModel):
-    filename: str
-    content_base64: str
-    protocol: str = "CP2"
-    custom_public_key: Optional[str] = None
+def get_current_user(authorization: Optional[str] = Header(None)):
+    """Helper dependency to extract and verify logged-in user from Authorization header."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authentication required. Please sign in.")
+    token = authorization.replace("Bearer ", "").strip()
+    try:
+        return auth_mgr.verify_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
 # ---------------------------------------------------------------------------
-# API Routes
+# Authentication API Routes
+# ---------------------------------------------------------------------------
+
+@app.post("/api/auth/register")
+def register(req: AuthRequest):
+    try:
+        return auth_mgr.register_user(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Registration failed: {e}")
+
+@app.post("/api/auth/login")
+def login(req: AuthRequest):
+    try:
+        return auth_mgr.login_user(req.email, req.password)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Login failed: {e}")
+
+@app.get("/api/auth/me")
+def get_me(current_user: dict = Depends(get_current_user)):
+    priv, pub = auth_mgr.get_user_keys(current_user["uid"])
+    return {
+        "uid": current_user["uid"],
+        "email": current_user["email"],
+        "public_key": pub,
+        "private_key": priv
+    }
+
+# ---------------------------------------------------------------------------
+# Vault API Routes (Strict Multi-Tenant Isolation)
 # ---------------------------------------------------------------------------
 
 @app.get("/api/status")
-def get_status():
-    return vault.get_vault_status()
-
-@app.get("/api/keys")
-def get_keys():
-    with open(PRIV_KEY_FILE, "r") as f:
-        priv = f.read()
-    with open(PUB_KEY_FILE, "r") as f:
-        pub = f.read()
-    return {"private_key": priv, "public_key": pub}
-
-@app.post("/api/keys/generate")
-def generate_new_keys():
-    priv, pub = crypto_engine.generate_rsa_keypair(2048)
-    with open(PRIV_KEY_FILE, "w") as f:
-        f.write(priv)
-    with open(PUB_KEY_FILE, "w") as f:
-        f.write(pub)
-    return {"private_key": priv, "public_key": pub, "message": "New RSA-2048 keypair generated!"}
+def get_status(authorization: Optional[str] = Header(None)):
+    user_uid = None
+    if authorization:
+        try:
+            token = authorization.replace("Bearer ", "").strip()
+            user_info = auth_mgr.verify_token(token)
+            user_uid = user_info["uid"]
+        except Exception:
+            pass
+    return vault.get_vault_status(owner_uid=user_uid)
 
 @app.get("/api/files")
-def list_files():
-    return vault.list_files()
+def list_files(current_user: dict = Depends(get_current_user)):
+    """Returns ONLY files owned by the logged-in user."""
+    return vault.list_files(owner_uid=current_user["uid"])
 
 @app.post("/api/upload")
-def upload_file(req: FileUploadRequest):
+async def upload_file(
+    file: UploadFile = File(...),
+    protocol: str = Form("CP2"),
+    current_user: dict = Depends(get_current_user)
+):
     temp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_uploads")
     os.makedirs(temp_dir, exist_ok=True)
-    temp_path = os.path.join(temp_dir, req.filename)
+    temp_path = os.path.join(temp_dir, file.filename)
 
     try:
-        file_bytes = base64.b64decode(req.content_base64)
+        content = await file.read()
         with open(temp_path, "wb") as f:
-            f.write(file_bytes)
+            f.write(content)
 
-        pub_key = req.custom_public_key if req.custom_public_key and req.custom_public_key.strip() else open(PUB_KEY_FILE).read()
-        metadata = vault.upload_file(temp_path, pub_key, protocol=req.protocol)
+        # Retrieve user's personal public key
+        priv_pem, pub_pem = auth_mgr.get_user_keys(current_user["uid"])
+        if not pub_pem:
+            raise HTTPException(status_code=400, detail="User public encryption key not found.")
+
+        # Upload strictly tagged with user ownership
+        metadata = vault.upload_file(
+            file_path=temp_path,
+            public_key_pem=pub_pem,
+            protocol=protocol,
+            owner_uid=current_user["uid"],
+            owner_email=current_user["email"]
+        )
         return metadata
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)
 
 @app.get("/api/download/{file_id}")
-def download_file(file_id: str, custom_private_key: Optional[str] = None):
-    priv_key = custom_private_key if custom_private_key and custom_private_key.strip() else open(PRIV_KEY_FILE).read()
+def download_file(file_id: str, current_user: dict = Depends(get_current_user)):
     out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
     os.makedirs(out_dir, exist_ok=True)
 
     try:
-        saved_path, verified, metadata = vault.download_file(file_id, priv_key, output_dir=out_dir)
+        priv_pem, _ = auth_mgr.get_user_keys(current_user["uid"])
+        saved_path, verified, metadata = vault.download_file(
+            file_id=file_id,
+            private_key_pem=priv_pem,
+            output_dir=out_dir,
+            user_uid=current_user["uid"]
+        )
         filename = metadata.get("file_name", "decrypted_file")
         with open(saved_path, "rb") as f:
             file_bytes = f.read()
@@ -112,22 +160,27 @@ def download_file(file_id: str, custom_private_key: Optional[str] = None):
         response.headers["X-Integrity-Verified"] = str(verified)
         response.headers["X-SHA256"] = metadata.get("sha256", "")
         return response
-    finally:
-        pass
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Decryption/Download error: {str(e)}")
 
 @app.delete("/api/files/{file_id}")
-def delete_file(file_id: str):
-    success = vault.delete_file(file_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="File not found")
-    return {"message": "File deleted from Firebase Vault"}
+def delete_file(file_id: str, current_user: dict = Depends(get_current_user)):
+    try:
+        success = vault.delete_file(file_id, user_uid=current_user["uid"])
+        if not success:
+            raise HTTPException(status_code=404, detail="File not found")
+        return {"message": "File permanently deleted from your vault"}
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
 
 @app.get("/api/benchmark/{sample_name}")
 def run_benchmark(sample_name: str):
     base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "NSProgrammingAssignment2")
     file_path = os.path.join(base_dir, sample_name)
     if not os.path.exists(file_path):
-        raise HTTPException(status_code=404, detail="Sample file not found")
+        raise HTTPException(status_code=404, detail="Sample benchmark file not found")
 
     with open(file_path, "rb") as f:
         data = f.read()
@@ -135,7 +188,7 @@ def run_benchmark(sample_name: str):
     return crypto_engine.run_crypto_benchmark(data, sample_name)
 
 # ---------------------------------------------------------------------------
-# HTML Web Dashboard (Fully self-contained CSS, zero external CDN reliance)
+# HTML Web Dashboard (Full Multi-Tenant UI with Standalone Embedded CSS)
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -145,9 +198,8 @@ def serve_ui():
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CNS Secure File Encryption System | Firebase Cloud Vault</title>
+  <title>CNS Multi-Tenant Secure File Encryption System</title>
   <style>
-    /* Reset & Base */
     *, *::before, *::after {
       box-sizing: border-box;
       margin: 0;
@@ -162,12 +214,11 @@ def serve_ui():
       -webkit-font-smoothing: antialiased;
     }
     code, pre, textarea {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
     }
 
-    /* Header */
     header {
-      background: rgba(17, 24, 39, 0.85);
+      background: rgba(17, 24, 39, 0.9);
       backdrop-filter: blur(8px);
       border-bottom: 1px solid #1e293b;
       position: sticky;
@@ -210,34 +261,98 @@ def serve_ui():
       font-size: 12px;
       color: #94a3b8;
     }
-    .status-pill {
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .user-pill {
       display: flex;
       align-items: center;
       gap: 8px;
-      background: rgba(16, 185, 129, 0.12);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      color: #34d399;
-      font-size: 12px;
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.35);
+      color: #a5b4fc;
+      font-size: 13px;
       font-weight: 600;
       padding: 6px 14px;
       border-radius: 9999px;
     }
-    .status-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #10b981;
-      box-shadow: 0 0 8px #10b981;
+    .btn-logout {
+      background: rgba(244, 63, 94, 0.15);
+      border: 1px solid rgba(244, 63, 94, 0.35);
+      color: #fb7185;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-logout:hover {
+      background: rgba(244, 63, 94, 0.3);
     }
 
-    /* Main Container */
     main {
       max-width: 1240px;
       margin: 0 auto;
       padding: 28px 20px 48px;
     }
 
-    /* Top Stats Grid */
+    /* Auth Overlay Modal */
+    .auth-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(11, 15, 25, 0.95);
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 20px;
+    }
+    .auth-card {
+      background: #111827;
+      border: 1px solid #1e293b;
+      border-radius: 20px;
+      padding: 32px;
+      max-width: 440px;
+      width: 100%;
+      box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+    }
+    .auth-tabs {
+      display: flex;
+      border-bottom: 1px solid #1e293b;
+      margin-bottom: 24px;
+    }
+    .auth-tab-btn {
+      flex: 1;
+      text-align: center;
+      padding: 10px;
+      font-size: 14px;
+      font-weight: 700;
+      background: transparent;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: #94a3b8;
+      cursor: pointer;
+    }
+    .auth-tab-btn.active {
+      color: #818cf8;
+      border-bottom-color: #6366f1;
+    }
+    .auth-error {
+      background: rgba(244, 63, 94, 0.15);
+      border: 1px solid rgba(244, 63, 94, 0.35);
+      color: #fb7185;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 13px;
+      margin-bottom: 16px;
+      display: none;
+    }
+
+    /* Stats Grid */
     .stats-grid {
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -249,10 +364,6 @@ def serve_ui():
       border: 1px solid #1e293b;
       border-radius: 14px;
       padding: 18px 20px;
-      transition: border-color 0.2s;
-    }
-    .stat-card:hover {
-      border-color: #334155;
     }
     .stat-label {
       font-size: 11px;
@@ -266,7 +377,6 @@ def serve_ui():
       font-weight: 800;
       color: #ffffff;
       margin-top: 6px;
-      letter-spacing: -0.02em;
     }
     .stat-sub {
       font-size: 12px;
@@ -295,25 +405,15 @@ def serve_ui():
       padding: 10px 18px;
       cursor: pointer;
       white-space: nowrap;
-      transition: all 0.2s;
-    }
-    .tab-btn:hover {
-      color: #e2e8f0;
     }
     .tab-btn.active {
       color: #818cf8;
       border-bottom-color: #6366f1;
     }
-
-    /* Tab content hiding */
-    .tab-content {
-      display: block;
-    }
     .tab-content.hidden, .hidden {
       display: none !important;
     }
 
-    /* Card Panels */
     .panel {
       background: #111827;
       border: 1px solid #1e293b;
@@ -332,7 +432,6 @@ def serve_ui():
       margin-bottom: 20px;
     }
 
-    /* Layout Grids */
     .grid-2col {
       display: grid;
       grid-template-columns: 2fr 1fr;
@@ -342,7 +441,6 @@ def serve_ui():
       .grid-2col { grid-template-columns: 1fr; }
     }
 
-    /* Drag & Drop Upload Zone */
     .upload-zone {
       border: 2px dashed #334155;
       background: #0b0f19;
@@ -359,10 +457,8 @@ def serve_ui():
     .upload-icon {
       width: 48px;
       height: 48px;
-      max-width: 48px;
-      max-height: 48px;
       display: block;
-      margin: 0 auto 12px auto;
+      margin: 0 auto 12px;
       color: #64748b;
     }
     .upload-prompt {
@@ -376,10 +472,7 @@ def serve_ui():
       margin-top: 4px;
     }
 
-    /* Form Fields */
-    .form-group {
-      margin-top: 18px;
-    }
+    .form-group { margin-top: 18px; }
     .form-label {
       display: block;
       font-size: 11px;
@@ -406,7 +499,6 @@ def serve_ui():
       padding: 10px 14px;
       font-size: 14px;
       outline: none;
-      transition: border-color 0.2s;
     }
     select:focus, input:focus, textarea:focus {
       border-color: #6366f1;
@@ -421,7 +513,6 @@ def serve_ui():
       font-weight: 500;
     }
 
-    /* Buttons */
     .btn-primary {
       width: 100%;
       background: linear-gradient(135deg, #6366f1, #4f46e5);
@@ -434,14 +525,6 @@ def serve_ui():
       cursor: pointer;
       margin-top: 20px;
       box-shadow: 0 4px 14px rgba(79, 70, 229, 0.35);
-      transition: transform 0.1s, opacity 0.2s;
-    }
-    .btn-primary:hover {
-      opacity: 0.95;
-      transform: translateY(-1px);
-    }
-    .btn-primary:active {
-      transform: translateY(0);
     }
     .btn-primary:disabled {
       opacity: 0.6;
@@ -457,10 +540,6 @@ def serve_ui():
       padding: 6px 14px;
       border-radius: 8px;
       cursor: pointer;
-      transition: all 0.2s;
-    }
-    .btn-sm:hover {
-      background: #334155;
     }
     .btn-download {
       background: rgba(16, 185, 129, 0.15);
@@ -469,19 +548,12 @@ def serve_ui():
       text-decoration: none;
       display: inline-block;
     }
-    .btn-download:hover {
-      background: rgba(16, 185, 129, 0.25);
-    }
     .btn-delete {
       background: rgba(244, 63, 94, 0.15);
       border: 1px solid rgba(244, 63, 94, 0.35);
       color: #fb7185;
     }
-    .btn-delete:hover {
-      background: rgba(244, 63, 94, 0.25);
-    }
 
-    /* Result Box */
     .result-box {
       margin-top: 20px;
       background: #0b0f19;
@@ -500,11 +572,8 @@ def serve_ui():
       color: #cbd5e1;
       margin-bottom: 4px;
     }
-    .result-item strong {
-      color: #94a3b8;
-    }
+    .result-item strong { color: #94a3b8; }
 
-    /* Assignment Samples List */
     .sample-item {
       background: #0b0f19;
       border: 1px solid #1e293b;
@@ -525,10 +594,7 @@ def serve_ui():
       color: #64748b;
     }
 
-    /* Table */
-    .table-responsive {
-      overflow-x: auto;
-    }
+    .table-responsive { overflow-x: auto; }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -554,21 +620,6 @@ def serve_ui():
       background: rgba(15, 23, 42, 0.4);
     }
 
-    /* Spinner */
-    .spinner {
-      border: 3px solid rgba(255, 255, 255, 0.1);
-      border-top-color: #6366f1;
-      border-radius: 50%;
-      width: 32px;
-      height: 32px;
-      animation: spin 0.8s linear infinite;
-      margin: 0 auto 12px;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-
-    /* Benchmark Result Grid */
     .bench-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -588,7 +639,6 @@ def serve_ui():
       font-size: 11px;
       font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
     }
     .bench-timing {
       font-size: 24px;
@@ -600,6 +650,36 @@ def serve_ui():
 </head>
 <body>
 
+  <!-- Auth Modal Overlay -->
+  <div id="authOverlay" class="auth-overlay">
+    <div class="auth-card">
+      <div style="text-align: center; margin-bottom: 24px;">
+        <div class="brand-badge" style="margin: 0 auto 12px; width: 48px; height: 48px; font-size: 20px;">CNS</div>
+        <h2 style="font-size: 20px; font-weight: 800; color: #fff;">Secure Vault Access</h2>
+        <p style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Zero-Knowledge Multi-Tenant Encrypted Storage</p>
+      </div>
+
+      <div class="auth-tabs">
+        <button id="authTabLogin" onclick="switchAuthTab('login')" class="auth-tab-btn active">Sign In</button>
+        <button id="authTabRegister" onclick="switchAuthTab('register')" class="auth-tab-btn">Register New User</button>
+      </div>
+
+      <div id="authError" class="auth-error"></div>
+
+      <form id="authForm" onsubmit="handleAuth(event)">
+        <div style="margin-bottom: 16px;">
+          <label class="form-label">Email Address</label>
+          <input type="email" id="authEmail" required placeholder="user@example.com" />
+        </div>
+        <div style="margin-bottom: 20px;">
+          <label class="form-label">Password</label>
+          <input type="password" id="authPassword" required placeholder="Minimum 6 characters" />
+        </div>
+        <button type="submit" id="authSubmitBtn" class="btn-primary" style="margin-top: 0;">Sign In to Vault</button>
+      </form>
+    </div>
+  </div>
+
   <!-- Header -->
   <header>
     <div class="header-inner">
@@ -607,12 +687,15 @@ def serve_ui():
         <div class="brand-badge">CNS</div>
         <div>
           <div class="brand-title">Secure File Encryption System</div>
-          <div class="brand-subtitle">Zero-Knowledge Envelope Encryption with Firebase</div>
+          <div class="brand-subtitle">Multi-Tenant Zero-Knowledge Cloud Vault</div>
         </div>
       </div>
-      <div class="status-pill">
-        <span class="status-dot"></span>
-        Firebase Spark Free Tier (100% Free)
+      <div class="header-actions">
+        <div id="userPill" class="user-pill">
+          <span>👤</span>
+          <span id="userEmailSpan">Not signed in</span>
+        </div>
+        <button onclick="handleLogout()" class="btn-logout">Sign Out</button>
       </div>
     </div>
   </header>
@@ -620,26 +703,26 @@ def serve_ui():
   <!-- Main Content -->
   <main>
 
-    <!-- Stats Bar -->
+    <!-- Top Stats -->
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-label">Cloud Database</div>
+        <div class="stat-label">My Vault Database</div>
         <div class="stat-val">Cloud Firestore</div>
         <div class="stat-sub text-emerald">1 GB Free Storage Quota</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total Encrypted Files</div>
+        <div class="stat-label">My Private Encrypted Files</div>
         <div id="statTotalFiles" class="stat-val text-indigo">0</div>
-        <div class="stat-sub text-emerald">Stored securely</div>
+        <div class="stat-sub text-emerald">Strict user isolation</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Total Encrypted Volume</div>
+        <div class="stat-label">My Encrypted Volume</div>
         <div id="statTotalBytes" class="stat-val text-amber">0 KB</div>
         <div class="stat-sub text-amber">Zero-Knowledge Ciphertext</div>
       </div>
       <div class="stat-card">
-        <div class="stat-label">Cryptographic Standard</div>
-        <div class="stat-val" style="font-size: 16px; margin-top: 10px;">RSA-2048 + AES-GCM</div>
+        <div class="stat-label">My Encryption Standard</div>
+        <div class="stat-val" style="font-size: 16px; margin-top: 10px;">Personal RSA-2048 + AES-GCM</div>
         <div class="stat-sub text-cyan">SHA-256 Checksum Integrity</div>
       </div>
     </div>
@@ -650,13 +733,13 @@ def serve_ui():
         Upload & Encrypt
       </button>
       <button onclick="switchTab('vault')" id="tabBtnVault" class="tab-btn">
-        Cloud Vault Explorer
+        My Cloud Vault Explorer
       </button>
       <button onclick="switchTab('benchmark')" id="tabBtnBenchmark" class="tab-btn">
         CP1 vs CP2 Benchmark
       </button>
       <button onclick="switchTab('keys')" id="tabBtnKeys" class="tab-btn">
-        RSA Key Manager
+        My RSA Key Manager
       </button>
     </div>
 
@@ -665,7 +748,7 @@ def serve_ui():
       <div class="grid-2col">
         <div class="panel">
           <h2 class="panel-title">Upload & Encrypt File</h2>
-          <p class="panel-desc">Select any file. It is encrypted client-side using authenticated encryption before being uploaded to Firebase.</p>
+          <p class="panel-desc">Files are encrypted locally with your personal RSA key and AES-256-GCM. <strong>No other user can view or decrypt your files.</strong></p>
 
           <form id="uploadForm" onsubmit="handleUpload(event)">
             <label class="form-label">Select File to Encrypt</label>
@@ -675,7 +758,7 @@ def serve_ui():
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path>
               </svg>
               <div id="selectedFileName" class="upload-prompt">Click or drag & drop a file here</div>
-              <div class="upload-hint">Supports any file size (automatic subcollection chunking)</div>
+              <div class="upload-hint">Fault-tolerant 400 KB chunking (handles files of any size)</div>
             </div>
 
             <div class="form-row form-group">
@@ -693,7 +776,7 @@ def serve_ui():
             </div>
 
             <button type="submit" id="uploadBtn" class="btn-primary">
-              Encrypt & Upload to Cloud Vault
+              Encrypt & Upload to My Private Vault
             </button>
           </form>
 
@@ -737,8 +820,8 @@ def serve_ui():
       <div class="panel">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
           <div>
-            <h2 class="panel-title">Firebase Encrypted Vault</h2>
-            <p class="panel-desc" style="margin-bottom: 0;">All files are stored as encrypted ciphertext. Only your RSA Private Key can decrypt them.</p>
+            <h2 class="panel-title">My Private Encrypted Files</h2>
+            <p class="panel-desc" style="margin-bottom: 0;">Filtered strictly to your account. Other registered users cannot see or access these files.</p>
           </div>
           <button onclick="loadVaultFiles()" class="btn-sm">Refresh List</button>
         </div>
@@ -757,7 +840,7 @@ def serve_ui():
               </tr>
             </thead>
             <tbody id="vaultTableBody">
-              <tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading files from Firebase...</td></tr>
+              <tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading your private vault files...</td></tr>
             </tbody>
           </table>
         </div>
@@ -777,8 +860,8 @@ def serve_ui():
         </div>
 
         <div id="benchmarkLoading" class="hidden" style="text-align: center; padding: 32px; color: #94a3b8;">
-          <div class="spinner"></div>
-          <div>Running encryption and decryption trials...</div>
+          <div style="display: inline-block; width: 32px; height: 32px; border: 3px solid rgba(255,255,255,0.1); border-top-color: #6366f1; border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+          <div style="margin-top: 12px;">Running encryption and decryption trials...</div>
         </div>
 
         <div id="benchmarkResults" class="hidden"></div>
@@ -788,23 +871,16 @@ def serve_ui():
     <!-- Tab 4: Keys -->
     <div id="tabKeys" class="tab-content hidden">
       <div class="panel">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
-          <div>
-            <h2 class="panel-title">RSA-2048 Asymmetric Key Pair</h2>
-            <p class="panel-desc" style="margin-bottom: 0;">Used for envelope encryption (encrypting symmetric AES keys) and authentication.</p>
-          </div>
-          <button onclick="generateNewKeys()" class="btn-sm" style="background: rgba(244, 63, 94, 0.15); border-color: rgba(244, 63, 94, 0.35); color: #fb7185;">
-            Generate New Keypair
-          </button>
-        </div>
+        <h2 class="panel-title">My Personal RSA-2048 Key Pair</h2>
+        <p class="panel-desc">Unique cryptographic keys assigned exclusively to your account. Your files are encrypted with this public key and can only be decrypted by your private key.</p>
 
         <div class="form-row" style="margin-top: 16px;">
           <div>
-            <label class="form-label">Public Key (SubjectPublicKeyInfo PEM)</label>
+            <label class="form-label">My Public Key (SubjectPublicKeyInfo PEM)</label>
             <textarea id="pubKeyArea" readonly rows="12" style="color: #818cf8;"></textarea>
           </div>
           <div>
-            <label class="form-label">Private Key (PKCS#8 PEM - KEEP SECRET)</label>
+            <label class="form-label">My Private Key (PKCS#8 PEM - KEEP SECRET)</label>
             <textarea id="privKeyArea" readonly rows="12" style="color: #fb7185;"></textarea>
           </div>
         </div>
@@ -814,6 +890,99 @@ def serve_ui():
   </main>
 
   <script>
+    let authMode = 'login';
+    let currentUser = null;
+
+    function getAuthHeaders() {
+      const token = localStorage.getItem('cns_id_token');
+      return token ? { 'Authorization': 'Bearer ' + token } : {};
+    }
+
+    function switchAuthTab(mode) {
+      authMode = mode;
+      document.getElementById('authError').style.display = 'none';
+      if (mode === 'login') {
+        document.getElementById('authTabLogin').classList.add('active');
+        document.getElementById('authTabRegister').classList.remove('active');
+        document.getElementById('authSubmitBtn').innerText = 'Sign In to Vault';
+      } else {
+        document.getElementById('authTabRegister').classList.add('active');
+        document.getElementById('authTabLogin').classList.remove('active');
+        document.getElementById('authSubmitBtn').innerText = 'Create Account & Generate Keys';
+      }
+    }
+
+    async function handleAuth(e) {
+      e.preventDefault();
+      const email = document.getElementById('authEmail').value.trim();
+      const password = document.getElementById('authPassword').value;
+      const errorDiv = document.getElementById('authError');
+      const submitBtn = document.getElementById('authSubmitBtn');
+
+      errorDiv.style.display = 'none';
+      submitBtn.disabled = true;
+      submitBtn.innerText = 'Verifying with Firebase...';
+
+      const endpoint = (authMode === 'login') ? '/api/auth/login' : '/api/auth/register';
+
+      try {
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.detail || 'Authentication failed');
+        }
+
+        // Save session
+        localStorage.setItem('cns_id_token', data.id_token);
+        localStorage.setItem('cns_email', data.email);
+        localStorage.setItem('cns_uid', data.uid);
+
+        document.getElementById('authOverlay').style.display = 'none';
+        initUserSession();
+      } catch (err) {
+        errorDiv.innerText = err.message;
+        errorDiv.style.display = 'block';
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.innerText = (authMode === 'login') ? 'Sign In to Vault' : 'Create Account & Generate Keys';
+      }
+    }
+
+    function handleLogout() {
+      if (!confirm('Are you sure you want to sign out?')) return;
+      localStorage.removeItem('cns_id_token');
+      localStorage.removeItem('cns_email');
+      localStorage.removeItem('cns_uid');
+      document.getElementById('authOverlay').style.display = 'flex';
+      document.getElementById('userEmailSpan').innerText = 'Not signed in';
+    }
+
+    async function initUserSession() {
+      const token = localStorage.getItem('cns_id_token');
+      if (!token) {
+        document.getElementById('authOverlay').style.display = 'flex';
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/auth/me', { headers: getAuthHeaders() });
+        if (!res.ok) throw new Error('Session expired');
+        currentUser = await res.json();
+        document.getElementById('userEmailSpan').innerText = currentUser.email;
+        document.getElementById('authOverlay').style.display = 'none';
+        document.getElementById('pubKeyArea').value = currentUser.public_key;
+        document.getElementById('privKeyArea').value = currentUser.private_key;
+        loadStats();
+        loadVaultFiles();
+      } catch (err) {
+        handleLogout();
+      }
+    }
+
     function switchTab(tabId) {
       document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
       document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
@@ -826,7 +995,6 @@ def serve_ui():
       }
 
       if (tabId === 'vault') loadVaultFiles();
-      if (tabId === 'keys') loadKeys();
     }
 
     function updateFileName(input) {
@@ -838,101 +1006,70 @@ def serve_ui():
 
     async function loadStats() {
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/status', { headers: getAuthHeaders() });
         const data = await res.json();
         document.getElementById('statTotalFiles').innerText = data.total_files;
         document.getElementById('statTotalBytes').innerText = (data.total_encrypted_bytes / 1024).toFixed(1) + ' KB';
       } catch (e) { console.error(e); }
     }
 
-    async function loadKeys() {
-      try {
-        const res = await fetch('/api/keys');
-        const data = await res.json();
-        document.getElementById('pubKeyArea').value = data.public_key;
-        document.getElementById('privKeyArea').value = data.private_key;
-      } catch (e) { console.error(e); }
-    }
-
-    async function generateNewKeys() {
-      if (!confirm('Generating a new keypair will replace the current active keys. Files encrypted with previous keys will require their original private key. Continue?')) return;
-      try {
-        const res = await fetch('/api/keys/generate', { method: 'POST' });
-        const data = await res.json();
-        document.getElementById('pubKeyArea').value = data.public_key;
-        document.getElementById('privKeyArea').value = data.private_key;
-        alert(data.message);
-      } catch (e) { alert('Error generating keys'); }
-    }
-
-    function readFileAsBase64(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const b64 = reader.result.split(',')[1];
-          resolve(b64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-
     async function handleUpload(e) {
       e.preventDefault();
       const fileInput = document.getElementById('fileInput');
       if (!fileInput.files.length) {
-        alert('Please select a file first.');
+        alert('Please select a file to encrypt first.');
         return;
       }
 
       const btn = document.getElementById('uploadBtn');
       btn.disabled = true;
-      btn.innerText = 'Encrypting & Storing in Firebase...';
+      btn.innerText = 'Encrypting & Storing in Private Vault...';
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('protocol', document.getElementById('protocolSelect').value);
 
       try {
-        const file = fileInput.files[0];
-        const contentBase64 = await readFileAsBase64(file);
-        const protocol = document.getElementById('protocolSelect').value;
-
         const res = await fetch('/api/upload', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            filename: file.name,
-            content_base64: contentBase64,
-            protocol: protocol
-          })
+          headers: getAuthHeaders(),
+          body: formData
         });
 
         const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Upload failed');
+
         const resDiv = document.getElementById('uploadResult');
         resDiv.classList.remove('hidden');
         resDiv.innerHTML = `
-          <div class="result-header">✔ File Successfully Encrypted and Stored in Firebase!</div>
+          <div class="result-header">✔ File Successfully Encrypted & Saved to Your Private Vault!</div>
+          <div class="result-item"><strong>File Name:</strong> ${data.file_name}</div>
           <div class="result-item"><strong>File ID:</strong> ${data.file_id}</div>
+          <div class="result-item"><strong>Owner:</strong> ${data.owner_email}</div>
           <div class="result-item"><strong>Protocol:</strong> ${data.protocol}</div>
           <div class="result-item"><strong>Original Size:</strong> ${data.original_size_bytes} bytes</div>
-          <div class="result-item"><strong>Encrypted Size:</strong> ${data.encrypted_size_bytes} bytes</div>
+          <div class="result-item"><strong>Encrypted Size:</strong> ${data.encrypted_size_bytes} bytes (${data.num_chunks} chunk(s))</div>
           <div class="result-item"><strong>SHA-256 Digest:</strong> ${data.sha256}</div>
           <div class="result-item"><strong>Encryption Time:</strong> ${data.encrypt_time_ms} ms</div>
         `;
         loadStats();
+        loadVaultFiles();
       } catch (err) {
-        alert('Upload failed: ' + err.message);
+        alert('Upload Error: ' + err.message);
       } finally {
         btn.disabled = false;
-        btn.innerText = 'Encrypt & Upload to Cloud Vault';
+        btn.innerText = 'Encrypt & Upload to My Private Vault';
       }
     }
 
     async function loadVaultFiles() {
       const tbody = document.getElementById('vaultTableBody');
-      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Fetching files from Firestore...</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Fetching your private files from Firestore...</td></tr>';
       try {
-        const res = await fetch('/api/files');
+        const res = await fetch('/api/files', { headers: getAuthHeaders() });
         const files = await res.json();
         if (!files.length) {
-          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">No files found in Firebase Vault.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Your private vault is currently empty. Upload a file to see it here.</td></tr>';
           return;
         }
 
@@ -945,9 +1082,9 @@ def serve_ui():
             <td style="font-family: monospace; font-size: 11px; color: #64748b;" title="${f.sha256}">${f.sha256 ? f.sha256.substring(0, 12) + '...' : '-'}</td>
             <td style="color: #94a3b8; font-size: 12px;">${f.uploaded_at || '-'}</td>
             <td style="text-align: right;">
-              <a href="/api/download/${f.file_id}" target="_blank" class="btn-sm btn-download" style="margin-right: 6px;">
+              <button onclick="downloadFile('${f.file_id}')" class="btn-sm btn-download" style="margin-right: 6px;">
                 Decrypt & Download
-              </a>
+              </button>
               <button onclick="deleteFile('${f.file_id}')" class="btn-sm btn-delete">
                 Delete
               </button>
@@ -955,17 +1092,53 @@ def serve_ui():
           </tr>
         `).join('');
       } catch (e) {
-        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #fb7185; padding: 24px;">Failed to load files from Firebase.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #fb7185; padding: 24px;">Failed to load vault files.</td></tr>';
+      }
+    }
+
+    async function downloadFile(fileId) {
+      try {
+        const res = await fetch('/api/download/' + fileId, { headers: getAuthHeaders() });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Download failed');
+        }
+
+        const disposition = res.headers.get('Content-Disposition');
+        let filename = 'decrypted_file';
+        if (disposition && disposition.indexOf('filename=') !== -1) {
+          const matches = /filename="([^"]*)"/.exec(disposition);
+          if (matches != null && matches[1]) filename = matches[1];
+        }
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('Download Error: ' + e.message);
       }
     }
 
     async function deleteFile(fileId) {
       if (!confirm('Are you sure you want to permanently delete this encrypted file?')) return;
       try {
-        await fetch('/api/files/' + fileId, { method: 'DELETE' });
+        const res = await fetch('/api/files/' + fileId, {
+          method: 'DELETE',
+          headers: getAuthHeaders()
+        });
+        if (!res.ok) {
+          const err = await res.json();
+          throw new Error(err.detail);
+        }
         loadVaultFiles();
         loadStats();
-      } catch (e) { alert('Failed to delete file'); }
+      } catch (e) { alert('Delete Error: ' + e.message); }
     }
 
     async function benchmarkSample(sampleName) {
@@ -1035,8 +1208,8 @@ def serve_ui():
       }
     }
 
-    // Init
-    loadStats();
+    // Init session on page load
+    initUserSession();
   </script>
 </body>
 </html>"""

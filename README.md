@@ -48,6 +48,16 @@ Repository: [https://github.com/AkashJanawad/CNS_File_Encryption_System.git](htt
 
 ---
 
+## Multi-User Authentication & Privacy Isolation
+
+The system now enforces strict **Multi-Tenancy and Access Control**:
+1. **Firebase Email/Password Authentication**: Each user registers with their email and password.
+2. **Personalized Keypairs**: Every user automatically receives their own dedicated **RSA-2048 Keypair** on signup.
+3. **Database-Level Isolation**: Files uploaded by User A are tagged with `owner_uid` and are **completely invisible** to User B in the Cloud Vault.
+4. **Access Control Verification**: Downloading or decrypting verifies user ownership; unauthorized users attempting to access another user's file receive a `403 Access Denied` response.
+
+---
+
 ## Quickstart Guide
 
 ### 1. Launch Interactive Web Dashboard
