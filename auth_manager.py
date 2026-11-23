@@ -154,3 +154,24 @@ class AuthManager:
             raise KeyError("User record not found.")
         data = doc.to_dict()
         return data.get("private_key", ""), data.get("public_key", "")
+
+    def get_or_create_user_profile(self, uid: str, email: str) -> Tuple[str, str]:
+        """
+        Retrieves user's RSA keys from Firestore, or generates and saves them if first time (e.g. Google Sign-In).
+        Returns (private_key_pem, public_key_pem).
+        """
+        doc = self.db.collection(self.users_coll).document(uid).get()
+        if not doc.exists:
+            priv_pem, pub_pem = crypto_engine.generate_rsa_keypair(2048)
+            self.db.collection(self.users_coll).document(uid).set({
+                "uid": uid,
+                "email": email,
+                "public_key": pub_pem,
+                "private_key": priv_pem,
+                "created_at": firestore.SERVER_TIMESTAMP,
+                "provider": "google"
+            })
+            return priv_pem, pub_pem
+        else:
+            user_data = doc.to_dict()
+            return user_data.get("private_key", ""), user_data.get("public_key", "")

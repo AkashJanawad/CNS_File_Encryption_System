@@ -2,9 +2,9 @@
 CNS Secure File Encryption System - Web Application
 FastAPI Server providing Multi-Tenant Zero-Knowledge Firebase Encrypted Storage & Benchmarking.
 Features:
-- Firebase Email/Password User Authentication
+- Firebase Email/Password & Google OAuth Authentication
 - Per-User Isolated Vault & Personalized RSA-2048 Keypairs
-- Direct Multipart File Upload Streaming (Rock-solid, handles files of any size)
+- Direct Multipart File Upload Streaming (Handles files of any size)
 - 400 KB safe Firestore chunking
 """
 
@@ -40,6 +40,9 @@ class AuthRequest(BaseModel):
     email: str
     password: str
 
+class GoogleAuthRequest(BaseModel):
+    id_token: str
+
 def get_current_user(authorization: Optional[str] = Header(None)):
     """Helper dependency to extract and verify logged-in user from Authorization header."""
     if not authorization:
@@ -71,6 +74,25 @@ def login(req: AuthRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Login failed: {e}")
+
+@app.post("/api/auth/google")
+def google_login(req: GoogleAuthRequest):
+    try:
+        user_info = auth_mgr.verify_token(req.id_token)
+        uid = user_info["uid"]
+        email = user_info.get("email", "")
+        priv_pem, pub_pem = auth_mgr.get_or_create_user_profile(uid, email)
+        return {
+            "uid": uid,
+            "email": email,
+            "id_token": req.id_token,
+            "public_key": pub_pem,
+            "private_key": priv_pem,
+            "provider": "google",
+            "message": "Google Authentication Successful!"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Google authentication failed: {str(e)}")
 
 @app.get("/api/auth/me")
 def get_me(current_user: dict = Depends(get_current_user)):
@@ -199,6 +221,11 @@ def serve_ui():
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>CNS Multi-Tenant Secure File Encryption System</title>
+  
+  <!-- Firebase App & Auth SDK (For Google Sign-In) -->
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+
   <style>
     *, *::before, *::after {
       box-sizing: border-box;
@@ -320,16 +347,94 @@ def serve_ui():
       width: 100%;
       box-shadow: 0 20px 40px rgba(0,0,0,0.6);
     }
+
+    /* Provider Selector */
+    .provider-selector {
+      display: flex;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .provider-btn {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 16px;
+      border-radius: 12px;
+      background: #0b0f19;
+      border: 1px solid #334155;
+      color: #94a3b8;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .provider-btn:hover {
+      border-color: #6366f1;
+      color: #ffffff;
+      transform: translateY(-1px);
+    }
+    .provider-btn.active {
+      background: rgba(99, 102, 241, 0.15);
+      border-color: #6366f1;
+      color: #818cf8;
+      box-shadow: 0 0 12px rgba(99, 102, 241, 0.25);
+    }
+
+    .btn-google-prominent {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: #ffffff;
+      color: #1f2937;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      padding: 12px 18px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    .btn-google-prominent:hover {
+      background: #f9fafb;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.3);
+      transform: translateY(-1px);
+    }
+
+    .auth-divider {
+      display: flex;
+      align-items: center;
+      text-align: center;
+      margin: 20px 0;
+      color: #64748b;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .auth-divider::before, .auth-divider::after {
+      content: '';
+      flex: 1;
+      border-bottom: 1px solid #1e293b;
+    }
+    .auth-divider::before { margin-right: 12px; }
+    .auth-divider::after { margin-left: 12px; }
+
     .auth-tabs {
       display: flex;
       border-bottom: 1px solid #1e293b;
-      margin-bottom: 24px;
+      margin-bottom: 20px;
     }
     .auth-tab-btn {
       flex: 1;
       text-align: center;
       padding: 10px;
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 700;
       background: transparent;
       border: none;
@@ -653,30 +758,67 @@ def serve_ui():
   <!-- Auth Modal Overlay -->
   <div id="authOverlay" class="auth-overlay">
     <div class="auth-card">
-      <div style="text-align: center; margin-bottom: 24px;">
+      <div style="text-align: center; margin-bottom: 20px;">
         <div class="brand-badge" style="margin: 0 auto 12px; width: 48px; height: 48px; font-size: 20px;">CNS</div>
         <h2 style="font-size: 20px; font-weight: 800; color: #fff;">Secure Vault Access</h2>
         <p style="font-size: 12px; color: #94a3b8; margin-top: 4px;">Zero-Knowledge Multi-Tenant Encrypted Storage</p>
       </div>
 
-      <div class="auth-tabs">
-        <button id="authTabLogin" onclick="switchAuthTab('login')" class="auth-tab-btn active">Sign In</button>
-        <button id="authTabRegister" onclick="switchAuthTab('register')" class="auth-tab-btn">Register New User</button>
+      <!-- Provider Selector: Email (Default) vs Google -->
+      <div class="provider-selector">
+        <button type="button" class="provider-btn active" id="btnProviderEmail" onclick="selectProvider('email')">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" width="18" height="18">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+          </svg>
+          Email & Password
+        </button>
+        <button type="button" class="provider-btn" id="btnProviderGoogle" onclick="handleGoogleSignIn()">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          Google
+        </button>
       </div>
 
       <div id="authError" class="auth-error"></div>
 
-      <form id="authForm" onsubmit="handleAuth(event)">
-        <div style="margin-bottom: 16px;">
-          <label class="form-label">Email Address</label>
-          <input type="email" id="authEmail" required placeholder="user@example.com" />
+      <!-- Quick One-Click Google Button -->
+      <div>
+        <button type="button" onclick="handleGoogleSignIn()" class="btn-google-prominent">
+          <svg viewBox="0 0 24 24" width="18" height="18">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          Sign in with Google Account
+        </button>
+      </div>
+
+      <div class="auth-divider">or enter with email</div>
+
+      <!-- Email / Password Section -->
+      <div id="emailAuthSection">
+        <div class="auth-tabs">
+          <button id="authTabLogin" onclick="switchAuthTab('login')" class="auth-tab-btn active">Sign In</button>
+          <button id="authTabRegister" onclick="switchAuthTab('register')" class="auth-tab-btn">Register New User</button>
         </div>
-        <div style="margin-bottom: 20px;">
-          <label class="form-label">Password</label>
-          <input type="password" id="authPassword" required placeholder="Minimum 6 characters" />
-        </div>
-        <button type="submit" id="authSubmitBtn" class="btn-primary" style="margin-top: 0;">Sign In to Vault</button>
-      </form>
+
+        <form id="authForm" onsubmit="handleAuth(event)">
+          <div style="margin-bottom: 16px;">
+            <label class="form-label">Email Address</label>
+            <input type="email" id="authEmail" required placeholder="Enter your email" />
+          </div>
+          <div style="margin-bottom: 20px;">
+            <label class="form-label">Password</label>
+            <input type="password" id="authPassword" required placeholder="Enter your password (min 6 chars)" />
+          </div>
+          <button type="submit" id="authSubmitBtn" class="btn-primary" style="margin-top: 0;">Sign In to Vault</button>
+        </form>
+      </div>
     </div>
   </div>
 
@@ -890,8 +1032,74 @@ def serve_ui():
   </main>
 
   <script>
+    // Firebase Web Client Config
+    const firebaseConfig = {
+      apiKey: "AIzaSyC5aQnCybc4DsZ5lYL98uMHtetY__s8dxc",
+      authDomain: "cns-file-encryption.firebaseapp.com",
+      projectId: "cns-file-encryption",
+      storageBucket: "cns-file-encryption.firebasestorage.app",
+      messagingSenderId: "783778225397",
+      appId: "1:783778225397:web:2fe81ad721d5d036c9b9bc"
+    };
+
+    if (typeof firebase !== 'undefined' && !firebase.apps.length) {
+      firebase.initializeApp(firebaseConfig);
+    }
+
     let authMode = 'login';
     let currentUser = null;
+
+    function selectProvider(provider) {
+      if (provider === 'email') {
+        document.getElementById('btnProviderEmail').classList.add('active');
+        document.getElementById('btnProviderGoogle').classList.remove('active');
+        document.getElementById('emailAuthSection').style.display = 'block';
+      }
+    }
+
+    async function handleGoogleSignIn() {
+      const errorDiv = document.getElementById('authError');
+      errorDiv.style.display = 'none';
+
+      try {
+        if (typeof firebase === 'undefined') {
+          throw new Error('Firebase client SDK failed to load. Please verify your internet connection.');
+        }
+
+        const provider = new firebase.auth.GoogleAuthProvider();
+        provider.setCustomParameters({ prompt: 'select_account' });
+
+        const result = await firebase.auth().signInWithPopup(provider);
+        const idToken = await result.user.getIdToken();
+
+        // Establish secure session with our backend
+        const res = await fetch('/api/auth/google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id_token: idToken })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Google authentication failed');
+
+        localStorage.setItem('cns_id_token', data.id_token);
+        localStorage.setItem('cns_email', data.email);
+        localStorage.setItem('cns_uid', data.uid);
+
+        document.getElementById('authOverlay').style.display = 'none';
+        initUserSession();
+      } catch (err) {
+        if (err.code === 'auth/popup-closed-by-user') {
+          return; // User canceled popup
+        }
+        if (err.code === 'auth/unauthorized-domain') {
+          errorDiv.innerText = 'Domain not authorized. Please open http://localhost:8000 in your browser (not 127.0.0.1) or add 127.0.0.1 to Firebase Console -> Authentication -> Settings -> Authorized Domains.';
+        } else {
+          errorDiv.innerText = err.message;
+        }
+        errorDiv.style.display = 'block';
+      }
+    }
 
     function getAuthHeaders() {
       const token = localStorage.getItem('cns_id_token');
@@ -957,6 +1165,9 @@ def serve_ui():
       localStorage.removeItem('cns_id_token');
       localStorage.removeItem('cns_email');
       localStorage.removeItem('cns_uid');
+      if (typeof firebase !== 'undefined' && firebase.auth) {
+        firebase.auth().signOut().catch(() => {});
+      }
       document.getElementById('authOverlay').style.display = 'flex';
       document.getElementById('userEmailSpan').innerText = 'Not signed in';
     }
@@ -1215,4 +1426,9 @@ def serve_ui():
 </html>"""
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=False)
+    print("\n" + "=" * 65)
+    print("  🚀 CNS Multi-Tenant Secure File Encryption System")
+    print("  🌐 Dashboard running at: http://localhost:8000")
+    print("  🔑 Authentication: Firebase Email/Password & Modern Google Sign-In")
+    print("=" * 65 + "\n")
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
