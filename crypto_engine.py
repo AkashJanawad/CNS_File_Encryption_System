@@ -237,3 +237,56 @@ def run_crypto_benchmark(sample_bytes: bytes, file_name: str) -> Dict[str, Any]:
         },
         "cp1_rsa": cp1_data
     }
+
+# ---------------------------------------------------------------------------
+# Envelope Re-Encryption for Secure File Sharing
+# ---------------------------------------------------------------------------
+
+def reencrypt_envelope_key(
+    encrypted_key_b64: str,
+    sender_private_key_pem: str,
+    recipient_public_key_pem: str
+) -> str:
+    """
+    Asymmetric Envelope Re-Encryption:
+    1. Decrypts the 256-bit AES key using the Sender's RSA Private Key.
+    2. Encrypts that exact same AES key using the Recipient's RSA Public Key (RSA-OAEP with SHA-256).
+    Zero-Knowledge: The ciphertext file payload is unchanged. Only the recipient can now decrypt it!
+    """
+    sender_priv = load_private_key(sender_private_key_pem)
+    recipient_pub = load_public_key(recipient_public_key_pem)
+
+    # 1. Decrypt AES key with sender's private key
+    enc_key_bytes = base64.b64decode(encrypted_key_b64)
+    aes_key = sender_priv.decrypt(
+        enc_key_bytes,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+
+    # 2. Re-encrypt AES key with recipient's public key
+    recipient_enc_key = recipient_pub.encrypt(
+        aes_key,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+
+    return base64.b64encode(recipient_enc_key).decode("utf-8")
+
+
+def reencrypt_cp1_payload(
+    ciphertext: bytes,
+    sender_private_key_pem: str,
+    recipient_public_key_pem: str
+) -> bytes:
+    """Re-encrypts pure RSA ciphertext for recipient."""
+    plaintext, _ = decrypt_cp1_rsa(ciphertext, sender_private_key_pem)
+    enc_res = encrypt_cp1_rsa(plaintext, recipient_public_key_pem)
+    return enc_res["ciphertext"]
+

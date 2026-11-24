@@ -50,6 +50,11 @@ class AuthRequest(BaseModel):
 class GoogleAuthRequest(BaseModel):
     id_token: str
 
+class ShareRequest(BaseModel):
+    file_id: str
+    recipient_email: Optional[str] = None
+    recipient_uid: Optional[str] = None
+
 def get_current_user(authorization: Optional[str] = Header(None)):
     """Helper dependency to extract and verify logged-in user from Authorization header."""
     if not authorization:
@@ -215,6 +220,131 @@ def run_benchmark(sample_name: str):
         data = f.read()
 
     return crypto_engine.run_crypto_benchmark(data, sample_name)
+
+# ---------------------------------------------------------------------------
+# Multi-Recipient Secure File Sharing Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/api/users")
+def get_registered_users(current_user: dict = Depends(get_current_user)):
+    """
+    Returns all registered emails in the system so User 1 can search, filter, and pick a recipient.
+    Excludes the current user from the list.
+    """
+    try:
+        users = auth_mgr.get_all_registered_users(exclude_uid=current_user["uid"])
+        return users
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch registered users: {str(e)}")
+
+@app.post("/api/share")
+def share_file_endpoint(req: ShareRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Asymmetrically re-encrypts the file's envelope key with the recipient's RSA public key,
+    and publishes the secure transfer to Firebase.
+    """
+    try:
+        # 1. Resolve recipient
+        recipient_profile = None
+        if req.recipient_uid:
+            all_users = auth_mgr.get_all_registered_users()
+            for u in all_users:
+                if u["uid"] == req.recipient_uid:
+                    recipient_profile = u
+                    break
+        elif req.recipient_email:
+            recipient_profile = auth_mgr.get_user_by_email(req.recipient_email)
+
+        if not recipient_profile:
+            raise HTTPException(status_code=404, detail="Recipient not found in registered users.")
+
+        if recipient_profile["uid"] == current_user["uid"]:
+            raise HTTPException(status_code=400, detail="Cannot share a file with yourself.")
+
+        # 2. Get sender private key
+        sender_priv, _ = auth_mgr.get_user_keys(current_user["uid"])
+
+        # 3. Perform Re-encryption & Register transfer in Firestore
+        transfer = vault.share_file(
+            file_id=req.file_id,
+            sender_uid=current_user["uid"],
+            sender_email=current_user["email"],
+            recipient_uid=recipient_profile["uid"],
+            recipient_email=recipient_profile["email"],
+            recipient_public_key_pem=recipient_profile["public_key"],
+            sender_private_key_pem=sender_priv
+        )
+
+        return {
+            "message": f"File '{transfer['file_name']}' successfully encrypted and shared with {recipient_profile['email']}!",
+            "transfer": transfer
+        }
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sharing error: {str(e)}")
+
+@app.get("/api/share/incoming")
+def get_incoming_shared_files(current_user: dict = Depends(get_current_user)):
+    """Returns files shared with the current user."""
+    try:
+        return vault.list_incoming_transfers(current_user["uid"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch incoming transfers: {str(e)}")
+
+@app.get("/api/share/outgoing")
+def get_outgoing_shared_files(current_user: dict = Depends(get_current_user)):
+    """Returns files shared by the current user with other people."""
+    try:
+        return vault.list_outgoing_transfers(current_user["uid"])
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch outgoing transfers: {str(e)}")
+
+@app.delete("/api/share/{transfer_id}")
+def revoke_shared_transfer(transfer_id: str, current_user: dict = Depends(get_current_user)):
+    """Revokes a shared transfer (sender only)."""
+    try:
+        success = vault.revoke_transfer(transfer_id, sender_uid=current_user["uid"])
+        if not success:
+            raise HTTPException(status_code=404, detail="Transfer not found")
+        return {"message": "Access revoked successfully."}
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Revocation error: {str(e)}")
+
+@app.get("/api/share/download/{transfer_id}")
+def download_shared_file_endpoint(transfer_id: str, current_user: dict = Depends(get_current_user)):
+    """Decrypts and downloads a shared file using the recipient's private key."""
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_downloads")
+    os.makedirs(out_dir, exist_ok=True)
+
+    try:
+        recip_priv, _ = auth_mgr.get_user_keys(current_user["uid"])
+        saved_path, verified, transfer = vault.download_shared_file(
+            transfer_id=transfer_id,
+            recipient_uid=current_user["uid"],
+            recipient_private_key_pem=recip_priv,
+            output_dir=out_dir
+        )
+        filename = transfer.get("file_name", "decrypted_shared_file")
+        with open(saved_path, "rb") as f:
+            file_bytes = f.read()
+
+        response = StreamingResponse(io.BytesIO(file_bytes), media_type="application/octet-stream")
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["X-Integrity-Verified"] = str(verified)
+        response.headers["X-SHA256"] = transfer.get("sha256", "")
+        return response
+    except PermissionError as pe:
+        raise HTTPException(status_code=403, detail=str(pe))
+    except KeyError as ke:
+        raise HTTPException(status_code=404, detail=str(ke))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Decryption/Download error: {str(e)}")
+
 
 # ---------------------------------------------------------------------------
 # HTML Web Dashboard (Full Multi-Tenant UI with Standalone Embedded CSS)
@@ -681,6 +811,85 @@ def serve_ui():
       border: 1px solid rgba(244, 63, 94, 0.35);
       color: #fb7185;
     }
+    .btn-share {
+      background: rgba(99, 102, 241, 0.15);
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      color: #818cf8;
+      cursor: pointer;
+    }
+    .btn-share:hover {
+      background: rgba(99, 102, 241, 0.3);
+      color: #ffffff;
+    }
+    .recipient-select-box {
+      max-height: 180px;
+      overflow-y: auto;
+      background: #0b0f19;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 6px;
+    }
+    .recipient-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.15s;
+      font-size: 13px;
+    }
+    .recipient-item:hover {
+      background: rgba(99, 102, 241, 0.15);
+      color: #ffffff;
+    }
+    .recipient-item.selected {
+      background: rgba(99, 102, 241, 0.25);
+      border: 1px solid #6366f1;
+      color: #818cf8;
+      font-weight: 600;
+    }
+    .recipient-pill {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-top: 8px;
+      padding: 8px 14px;
+      border-radius: 10px;
+      background: rgba(99, 102, 241, 0.18);
+      border: 1px solid rgba(99, 102, 241, 0.4);
+      font-size: 13px;
+      color: #a5b4fc;
+    }
+    .pill-clear-btn {
+      background: transparent;
+      border: none;
+      color: #fb7185;
+      font-size: 14px;
+      cursor: pointer;
+      padding: 0 4px;
+    }
+    .share-security-notice {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px dashed rgba(99, 102, 241, 0.35);
+      border-radius: 12px;
+      padding: 12px 14px;
+      margin-top: 10px;
+    }
+    .badge-count {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: #f43f5e;
+      color: #ffffff;
+      border-radius: 9999px;
+      font-size: 11px;
+      font-weight: 800;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 5px;
+      margin-left: 6px;
+    }
 
     .result-box {
       margin-top: 20px;
@@ -846,10 +1055,6 @@ def serve_ui():
           <div class="brand-subtitle">Multi-Tenant Zero-Knowledge Cloud Vault</div>
         </div>
       </div>
-          <div class="brand-title">Secure File Encryption System</div>
-          <div class="brand-subtitle">Multi-Tenant Zero-Knowledge Cloud Vault</div>
-        </div>
-      </div>
       <div class="header-actions">
         <div id="userPill" class="user-pill">
           <span>👤</span>
@@ -876,13 +1081,18 @@ def serve_ui():
         <div class="stat-sub text-emerald">Strict user isolation</div>
       </div>
       <div class="stat-card">
+        <div class="stat-label">Incoming Transfers</div>
+        <div id="statIncomingFiles" class="stat-val text-cyan">0</div>
+        <div class="stat-sub text-cyan">Shared with my public key</div>
+      </div>
+      <div class="stat-card">
         <div class="stat-label">My Encrypted Volume</div>
         <div id="statTotalBytes" class="stat-val text-amber">0 KB</div>
         <div class="stat-sub text-amber">Zero-Knowledge Ciphertext</div>
       </div>
       <div class="stat-card">
         <div class="stat-label">My Encryption Standard</div>
-        <div class="stat-val" style="font-size: 16px; margin-top: 10px;">Personal RSA-2048 + AES-GCM</div>
+        <div class="stat-val" style="font-size: 15px; margin-top: 10px;">Personal RSA-2048 + AES-GCM</div>
         <div class="stat-sub text-cyan">SHA-256 Checksum Integrity</div>
       </div>
     </div>
@@ -894,6 +1104,9 @@ def serve_ui():
       </button>
       <button onclick="switchTab('vault')" id="tabBtnVault" class="tab-btn">
         My Cloud Vault Explorer
+      </button>
+      <button onclick="switchTab('share')" id="tabBtnShare" class="tab-btn">
+        🔗 Secure File Sharing <span id="incomingBadge" class="badge-count hidden">0</span>
       </button>
       <button onclick="switchTab('benchmark')" id="tabBtnBenchmark" class="tab-btn">
         CP1 vs CP2 Benchmark
@@ -1001,6 +1214,125 @@ def serve_ui():
             </thead>
             <tbody id="vaultTableBody">
               <tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading your private vault files...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tab: Secure File Sharing (Multi-Recipient Re-Encryption) -->
+    <div id="tabShare" class="tab-content hidden">
+      <!-- 1. Send Encrypted File to Another User -->
+      <div class="panel" style="margin-bottom: 24px;">
+        <h2 class="panel-title">Secure File Transfer & Re-Encryption Console</h2>
+        <p class="panel-desc">
+          Share files securely with other registered users. The AES encryption key is asymmetrically re-encrypted with the recipient's RSA-2048 Public Key.
+          <strong>Only the intended recipient's private key can decrypt the file.</strong> Zero plain data travels through the network.
+        </p>
+
+        <form id="shareForm" onsubmit="handleSendShare(event)">
+          <div class="grid-2col" style="margin-top: 16px;">
+            <!-- Step 1: Select Recipient -->
+            <div>
+              <label class="form-label">Step 1: Search & Select Recipient Email</label>
+              <div style="position: relative;">
+                <input 
+                  type="text" 
+                  id="recipientSearchInput" 
+                  placeholder="🔍 Type to filter registered emails..." 
+                  oninput="filterRecipientEmails()"
+                  autocomplete="off"
+                  style="margin-bottom: 8px;"
+                />
+              </div>
+              <div id="recipientList" class="recipient-select-box">
+                <div style="color: #64748b; font-size: 12px; padding: 12px; text-align: center;">Loading registered users...</div>
+              </div>
+              <input type="hidden" id="selectedRecipientUid" required />
+              <input type="hidden" id="selectedRecipientEmail" required />
+              <div id="selectedRecipientPill" class="recipient-pill hidden">
+                <span>Selected: <strong id="selectedRecipientText"></strong></span>
+                <button type="button" onclick="clearSelectedRecipient()" class="pill-clear-btn" title="Remove recipient">✕</button>
+              </div>
+            </div>
+
+            <!-- Step 2: Choose File from My Vault -->
+            <div>
+              <label class="form-label">Step 2: Choose File from My Uploaded Vault</label>
+              <select id="shareFileSelect" required style="width: 100%; margin-bottom: 12px;">
+                <option value="">-- Select one of your uploaded files --</option>
+              </select>
+
+              <div class="share-security-notice">
+                <div style="font-weight: 700; color: #a5b4fc; margin-bottom: 4px;">🔐 Zero-Knowledge Transmission</div>
+                <div style="font-size: 12px; color: #94a3b8; line-height: 1.5;">
+                  The ciphertext payload in Cloud Firestore is untouched. Only the 256-bit AES key envelope is re-encrypted using the recipient's unique public key.
+                </div>
+              </div>
+
+              <button type="submit" id="btnSendShare" class="btn-primary" style="margin-top: 16px;">
+                🔒 Re-Encrypt & Send to Recipient
+              </button>
+            </div>
+          </div>
+        </form>
+
+        <div id="shareResult" class="result-box hidden" style="margin-top: 16px;"></div>
+      </div>
+
+      <!-- 2. Files Shared With Me (Incoming Vault) -->
+      <div class="panel" style="margin-bottom: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <h2 class="panel-title">📥 Files Shared With Me (Incoming Secure Transfers)</h2>
+            <p class="panel-desc" style="margin-bottom: 0;">Encrypted specifically for your RSA public key. Click Decrypt & Download to recover the original file using your private key.</p>
+          </div>
+          <button onclick="loadIncomingTransfers()" class="btn-sm">Refresh Incoming</button>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>File Name</th>
+                <th>Sender</th>
+                <th>Protocol</th>
+                <th>Original Size</th>
+                <th>Encrypted Size</th>
+                <th>Received At</th>
+                <th style="text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="incomingTableBody">
+              <tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">No incoming shared files yet.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- 3. Files I Shared With Others (Outgoing Transfers) -->
+      <div class="panel">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <h2 class="panel-title">📤 Files I Have Shared (Outgoing Transfers)</h2>
+            <p class="panel-desc" style="margin-bottom: 0;">Manage outgoing access grants. You can revoke access at any time.</p>
+          </div>
+          <button onclick="loadOutgoingTransfers()" class="btn-sm">Refresh Outgoing</button>
+        </div>
+
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>File Name</th>
+                <th>Shared With</th>
+                <th>Date Sent</th>
+                <th>Status</th>
+                <th style="text-align: right;">Action</th>
+              </tr>
+            </thead>
+            <tbody id="outgoingTableBody">
+              <tr><td colspan="5" style="text-align: center; color: #64748b; padding: 24px;">You have not shared any files yet.</td></tr>
             </tbody>
           </table>
         </div>
@@ -1217,6 +1549,10 @@ def serve_ui():
       if (statTotalFiles) statTotalFiles.innerText = '0';
       const statTotalBytes = document.getElementById('statTotalBytes');
       if (statTotalBytes) statTotalBytes.innerText = '0 KB';
+      const statIncoming = document.getElementById('statIncomingFiles');
+      if (statIncoming) statIncoming.innerText = '0';
+      const incomingBadge = document.getElementById('incomingBadge');
+      if (incomingBadge) incomingBadge.classList.add('hidden');
       
       const tbody = document.getElementById('vaultTableBody');
       if (tbody) tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Loading private vault files...</td></tr>';
@@ -1225,6 +1561,17 @@ def serve_ui():
       if (pubArea) pubArea.value = '';
       const privArea = document.getElementById('privKeyArea');
       if (privArea) privArea.value = '';
+
+      const shareResult = document.getElementById('shareResult');
+      if (shareResult) {
+        shareResult.classList.add('hidden');
+        shareResult.innerHTML = '';
+      }
+      clearSelectedRecipient();
+      const inTable = document.getElementById('incomingTableBody');
+      if (inTable) inTable.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">No incoming shared files.</td></tr>';
+      const outTable = document.getElementById('outgoingTableBody');
+      if (outTable) outTable.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #64748b; padding: 24px;">No outgoing shared files.</td></tr>';
     }
 
     async function initUserSession() {
@@ -1245,6 +1592,9 @@ def serve_ui():
         document.getElementById('privKeyArea').value = currentUser.private_key;
         loadStats();
         loadVaultFiles();
+        loadRegisteredUsers();
+        loadIncomingTransfers();
+        loadOutgoingTransfers();
       } catch (err) {
         handleLogout();
       }
@@ -1262,6 +1612,11 @@ def serve_ui():
       }
 
       if (tabId === 'vault') loadVaultFiles();
+      if (tabId === 'share') {
+        loadRegisteredUsers();
+        loadIncomingTransfers();
+        loadOutgoingTransfers();
+      }
     }
 
     function updateFileName(input) {
@@ -1335,6 +1690,7 @@ def serve_ui():
       try {
         const res = await fetch('/api/files', { headers: getAuthHeaders() });
         const files = await res.json();
+        populateShareFileDropdown(files);
         if (!files.length) {
           tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">Your private vault is currently empty. Upload a file to see it here.</td></tr>';
           return;
@@ -1349,6 +1705,9 @@ def serve_ui():
             <td style="font-family: monospace; font-size: 11px; color: #64748b;" title="${f.sha256}">${f.sha256 ? f.sha256.substring(0, 12) + '...' : '-'}</td>
             <td style="color: #94a3b8; font-size: 12px;">${f.uploaded_at || '-'}</td>
             <td style="text-align: right;">
+              <button onclick="openShareModal('${f.file_id}')" class="btn-sm btn-share" style="margin-right: 6px;">
+                Share
+              </button>
               <button onclick="downloadFile('${f.file_id}')" class="btn-sm btn-download" style="margin-right: 6px;">
                 Decrypt & Download
               </button>
@@ -1406,6 +1765,265 @@ def serve_ui():
         loadVaultFiles();
         loadStats();
       } catch (e) { alert('Delete Error: ' + e.message); }
+    }
+
+    // -----------------------------------------------------------------------
+    // Secure Sharing Client Logic (Multi-Recipient Re-Encryption)
+    // -----------------------------------------------------------------------
+
+    let registeredUsersList = [];
+
+    async function loadRegisteredUsers() {
+      try {
+        const res = await fetch('/api/users', { headers: getAuthHeaders() });
+        if (!res.ok) return;
+        registeredUsersList = await res.json();
+        renderRecipientList(registeredUsersList);
+      } catch (err) {
+        console.error('Failed to load registered users:', err);
+      }
+    }
+
+    function renderRecipientList(users) {
+      const container = document.getElementById('recipientList');
+      if (!container) return;
+      if (!users || !users.length) {
+        container.innerHTML = '<div style="color: #64748b; font-size: 12px; padding: 12px; text-align: center;">No other registered users found.</div>';
+        return;
+      }
+
+      const selectedUid = document.getElementById('selectedRecipientUid').value;
+      container.innerHTML = users.map(u => {
+        const isSelected = (selectedUid === u.uid);
+        return `
+          <div class="recipient-item ${isSelected ? 'selected' : ''}" onclick="selectRecipient('${u.uid}', '${u.email}')">
+            <div>
+              <span style="font-weight: 600; color: #f1f5f9;">${u.email}</span>
+            </div>
+            <span style="font-size: 10px; color: #34d399; background: rgba(52, 211, 153, 0.1); padding: 2px 6px; border-radius: 4px;">RSA-2048 Ready</span>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function filterRecipientEmails() {
+      const q = (document.getElementById('recipientSearchInput').value || '').toLowerCase().trim();
+      if (!q) {
+        renderRecipientList(registeredUsersList);
+        return;
+      }
+      const filtered = registeredUsersList.filter(u => u.email.toLowerCase().includes(q));
+      renderRecipientList(filtered);
+    }
+
+    function selectRecipient(uid, email) {
+      document.getElementById('selectedRecipientUid').value = uid;
+      document.getElementById('selectedRecipientEmail').value = email;
+      document.getElementById('selectedRecipientText').innerText = email;
+      document.getElementById('selectedRecipientPill').classList.remove('hidden');
+      renderRecipientList(registeredUsersList);
+    }
+
+    function clearSelectedRecipient() {
+      const uidInput = document.getElementById('selectedRecipientUid');
+      const emailInput = document.getElementById('selectedRecipientEmail');
+      const pill = document.getElementById('selectedRecipientPill');
+      if (uidInput) uidInput.value = '';
+      if (emailInput) emailInput.value = '';
+      if (pill) pill.classList.add('hidden');
+      renderRecipientList(registeredUsersList);
+    }
+
+    function populateShareFileDropdown(files) {
+      const select = document.getElementById('shareFileSelect');
+      if (!select) return;
+      const currentVal = select.value;
+      select.innerHTML = '<option value="">-- Select one of your uploaded files --</option>' +
+        files.map(f => `<option value="${f.file_id}">${f.file_name} (${(f.original_size_bytes/1024).toFixed(1)} KB - ${f.protocol ? f.protocol.split(' ')[0] : 'CP2'})</option>`).join('');
+      if (currentVal) select.value = currentVal;
+    }
+
+    function openShareModal(fileId) {
+      switchTab('share');
+      const select = document.getElementById('shareFileSelect');
+      if (select) select.value = fileId;
+      const searchInput = document.getElementById('recipientSearchInput');
+      if (searchInput) searchInput.focus();
+    }
+
+    async function handleSendShare(e) {
+      e.preventDefault();
+      const fileId = document.getElementById('shareFileSelect').value;
+      const recipientUid = document.getElementById('selectedRecipientUid').value;
+      const recipientEmail = document.getElementById('selectedRecipientEmail').value;
+      const resultDiv = document.getElementById('shareResult');
+      const btn = document.getElementById('btnSendShare');
+
+      if (!recipientUid) {
+        alert('Please search and select a recipient email first.');
+        return;
+      }
+      if (!fileId) {
+        alert('Please select a file to share.');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerText = 'Re-Encrypting Key Envelope with Recipient Public Key...';
+      resultDiv.classList.add('hidden');
+
+      try {
+        const res = await fetch('/api/share', {
+          method: 'POST',
+          headers: { ...getAuthHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file_id: fileId, recipient_uid: recipientUid, recipient_email: recipientEmail })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Sharing failed');
+
+        resultDiv.classList.remove('hidden');
+        resultDiv.innerHTML = `
+          <div class="result-header">✔ File Successfully Encrypted & Transferred!</div>
+          <div class="result-item"><strong>Recipient:</strong> ${data.transfer.recipient_email}</div>
+          <div class="result-item"><strong>File Name:</strong> ${data.transfer.file_name}</div>
+          <div class="result-item"><strong>Protocol:</strong> ${data.transfer.protocol}</div>
+          <div class="result-item"><strong>Security:</strong> Key re-encrypted with recipient's RSA-2048 public key</div>
+          <div class="result-item"><strong>SHA-256 Digest:</strong> ${data.transfer.sha256}</div>
+          <div class="result-item" style="color: #34d399; margin-top: 6px;">
+            🔒 Zero-Knowledge Guarantee: Ciphertext is stored in Cloud Vault; only ${data.transfer.recipient_email}'s private key can decrypt it.
+          </div>
+        `;
+
+        loadOutgoingTransfers();
+      } catch (err) {
+        alert('Sharing Error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerText = '🔒 Re-Encrypt & Send to Recipient';
+      }
+    }
+
+    async function loadIncomingTransfers() {
+      const tbody = document.getElementById('incomingTableBody');
+      const badge = document.getElementById('incomingBadge');
+      const statIncoming = document.getElementById('statIncomingFiles');
+      if (!tbody) return;
+
+      try {
+        const res = await fetch('/api/share/incoming', { headers: getAuthHeaders() });
+        const list = await res.json();
+        
+        if (badge) {
+          if (list.length > 0) {
+            badge.innerText = list.length;
+            badge.classList.remove('hidden');
+          } else {
+            badge.classList.add('hidden');
+          }
+        }
+        if (statIncoming) statIncoming.innerText = list.length;
+
+        if (!list.length) {
+          tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #64748b; padding: 24px;">No incoming shared files yet.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = list.map(t => `
+          <tr>
+            <td style="font-weight: 600; color: #f1f5f9;">${t.file_name}</td>
+            <td style="color: #818cf8; font-size: 12px;">${t.sender_email}</td>
+            <td style="color: #94a3b8; font-size: 12px;">${t.protocol ? t.protocol.split(' ')[0] : 'CP2'}</td>
+            <td style="color: #94a3b8; font-size: 12px;">${(t.original_size_bytes / 1024).toFixed(1)} KB</td>
+            <td style="color: #fbbf24; font-size: 12px;">${(t.encrypted_size_bytes / 1024).toFixed(1)} KB</td>
+            <td style="color: #94a3b8; font-size: 12px;">${t.shared_at || '-'}</td>
+            <td style="text-align: right;">
+              <button onclick="downloadSharedFile('${t.transfer_id}')" class="btn-sm btn-download">
+                Decrypt & Download
+              </button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to load incoming transfers:', err);
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: #fb7185; padding: 24px;">Failed to load incoming files.</td></tr>';
+      }
+    }
+
+    async function loadOutgoingTransfers() {
+      const tbody = document.getElementById('outgoingTableBody');
+      if (!tbody) return;
+      try {
+        const res = await fetch('/api/share/outgoing', { headers: getAuthHeaders() });
+        const list = await res.json();
+
+        if (!list.length) {
+          tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #64748b; padding: 24px;">You have not shared any files yet.</td></tr>';
+          return;
+        }
+
+        tbody.innerHTML = list.map(t => `
+          <tr>
+            <td style="font-weight: 600; color: #f1f5f9;">${t.file_name}</td>
+            <td style="color: #818cf8; font-size: 12px;">${t.recipient_email}</td>
+            <td style="color: #94a3b8; font-size: 12px;">${t.shared_at || '-'}</td>
+            <td><span style="font-size: 11px; padding: 2px 8px; border-radius: 9999px; background: rgba(52, 211, 153, 0.15); color: #34d399; font-weight: 700;">${t.status}</span></td>
+            <td style="text-align: right;">
+              <button onclick="revokeShare('${t.transfer_id}')" class="btn-sm btn-delete">
+                Revoke Access
+              </button>
+            </td>
+          </tr>
+        `).join('');
+      } catch (err) {
+        console.error('Failed to load outgoing transfers:', err);
+      }
+    }
+
+    async function downloadSharedFile(transferId) {
+      try {
+        const res = await fetch('/api/share/download/' + transferId, { headers: getAuthHeaders() });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Download failed');
+        }
+
+        const disposition = res.headers.get('Content-Disposition');
+        let filename = 'decrypted_shared_file';
+        if (disposition && disposition.indexOf('filename=') !== -1) {
+          const matches = /filename="([^"]*)"/.exec(disposition);
+          if (matches && matches[1]) filename = matches[1];
+        }
+
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+      } catch (err) {
+        alert('Download Error: ' + err.message);
+      }
+    }
+
+    async function revokeShare(transferId) {
+      if (!confirm('Are you sure you want to revoke recipient access to this file?')) return;
+      try {
+        const res = await fetch('/api/share/' + transferId, {
+          method: 'DELETE',
+          headers: getAuthHeaders()
+        });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || 'Revocation failed');
+        }
+        alert('Access revoked successfully.');
+        loadOutgoingTransfers();
+      } catch (err) {
+        alert('Error: ' + err.message);
+      }
     }
 
     async function benchmarkSample(sampleName) {

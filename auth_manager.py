@@ -6,7 +6,7 @@ Handles User Authentication via Firebase Authentication and User Profile / RSA K
 import os
 import json
 import requests
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
@@ -175,3 +175,77 @@ class AuthManager:
         else:
             user_data = doc.to_dict()
             return user_data.get("private_key", ""), user_data.get("public_key", "")
+
+    def get_all_registered_users(self, exclude_uid: Optional[str] = None) -> List[Dict[str, str]]:
+        """
+        Retrieves all registered users across Firebase Auth and Firestore.
+        Ensures public keys are available for cryptographic envelope re-encryption.
+        """
+        users_map: Dict[str, Dict[str, Any]] = {}
+
+        # 1. Gather all users registered in Firestore cns_users
+        for doc in self.db.collection(self.users_coll).stream():
+            d = doc.to_dict()
+            if d.get("uid"):
+                users_map[d["uid"]] = d
+
+        # 2. Check Firebase Auth to discover all accounts (e.g. direct auth users)
+        try:
+            page = auth.list_users()
+            for u in page.users:
+                if u.uid not in users_map and u.email:
+                    priv, pub = crypto_engine.generate_rsa_keypair(2048)
+                    profile = {
+                        "uid": u.uid,
+                        "email": u.email,
+                        "public_key": pub,
+                        "private_key": priv,
+                        "provider": "firebase_auth"
+                    }
+                    self.db.collection(self.users_coll).document(u.uid).set(profile)
+                    users_map[u.uid] = profile
+        except Exception as e:
+            print(f"Warning syncing Auth users: {e}")
+
+        # 3. Return clean list of candidates (excluding requesting user)
+        result = []
+        for uid, data in users_map.items():
+            if exclude_uid and uid == exclude_uid:
+                continue
+            email = data.get("email")
+            if email:
+                result.append({
+                    "uid": uid,
+                    "email": email,
+                    "public_key": data.get("public_key", "")
+                })
+
+        result.sort(key=lambda x: x["email"].lower())
+        return result
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        """Finds user by email and returns their profile with public key."""
+        clean_email = email.strip().lower()
+        query = self.db.collection(self.users_coll).where("email", "==", clean_email).limit(1).stream()
+        for doc in query:
+            return doc.to_dict()
+
+        # Check Firebase Auth directly
+        try:
+            u = auth.get_user_by_email(clean_email)
+            if u:
+                priv, pub = crypto_engine.generate_rsa_keypair(2048)
+                profile = {
+                    "uid": u.uid,
+                    "email": u.email,
+                    "public_key": pub,
+                    "private_key": priv,
+                    "provider": "firebase_auth"
+                }
+                self.db.collection(self.users_coll).document(u.uid).set(profile)
+                return profile
+        except Exception:
+            pass
+
+        return None
+

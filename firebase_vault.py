@@ -241,3 +241,193 @@ class FirebaseCloudVault:
             "total_encrypted_bytes": total_enc_bytes,
             "storage_allowance": "1 GB Free Tier"
         }
+
+    # -----------------------------------------------------------------------
+    # Multi-Recipient Secure Sharing & Transfer Methods
+    # -----------------------------------------------------------------------
+
+    def share_file(
+        self,
+        file_id: str,
+        sender_uid: str,
+        sender_email: str,
+        recipient_uid: str,
+        recipient_email: str,
+        recipient_public_key_pem: str,
+        sender_private_key_pem: str
+    ) -> Dict[str, Any]:
+        """
+        Securely shares an encrypted file with a recipient using Asymmetric Envelope Re-Encryption.
+        - Verifies sender owns the file.
+        - Re-encrypts the AES-256 key with Recipient's RSA-2048 Public Key.
+        - The ciphertext payload stays in Cloud Firestore; no plain data ever touches the network.
+        - Only the recipient's private key can decrypt this transfer.
+        """
+        if sender_uid == recipient_uid:
+            raise ValueError("You cannot share a file with yourself.")
+
+        doc_ref = self.db.collection(self.collection_name).document(file_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            raise KeyError(f"File ID {file_id} not found.")
+
+        file_data = doc.to_dict()
+        if file_data.get("owner_uid") and file_data.get("owner_uid") != sender_uid:
+            raise PermissionError("Access Denied: You can only share files that you own.")
+
+        protocol = file_data.get("protocol", "CP2")
+        transfer_id = str(uuid.uuid4())
+
+        # Perform Re-Encryption
+        if "CP1" in protocol:
+            if not file_data.get("is_chunked", False):
+                ciphertext = file_data.get("ciphertext", b"")
+            else:
+                num_chunks = file_data.get("num_chunks", 1)
+                chunk_bytes = []
+                for i in range(num_chunks):
+                    chunk_doc = doc_ref.collection("chunks").document(f"chunk_{i}").get()
+                    chunk_bytes.append(chunk_doc.to_dict()["data"])
+                ciphertext = b"".join(chunk_bytes)
+            recip_cipher = crypto_engine.reencrypt_cp1_payload(ciphertext, sender_private_key_pem, recipient_public_key_pem)
+            recipient_enc_key = ""
+        else:
+            # CP2: Envelope Re-encryption (Fast, Zero-overhead)
+            orig_enc_key = file_data.get("encrypted_key_b64", "")
+            recipient_enc_key = crypto_engine.reencrypt_envelope_key(
+                orig_enc_key,
+                sender_private_key_pem,
+                recipient_public_key_pem
+            )
+
+        transfer_doc = {
+            "transfer_id": transfer_id,
+            "file_id": file_id,
+            "file_name": file_data.get("file_name", "shared_file"),
+            "sender_uid": sender_uid,
+            "sender_email": sender_email,
+            "recipient_uid": recipient_uid,
+            "recipient_email": recipient_email,
+            "protocol": protocol,
+            "original_size_bytes": file_data.get("original_size_bytes", 0),
+            "encrypted_size_bytes": file_data.get("encrypted_size_bytes", 0),
+            "sha256": file_data.get("sha256", ""),
+            "nonce_b64": file_data.get("nonce_b64", ""),
+            "encrypted_key_b64": recipient_enc_key,
+            "shared_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
+            "timestamp": time.time(),
+            "status": "ACTIVE"
+        }
+
+        # Store transfer in cns_shared_transfers
+        self.db.collection("cns_shared_transfers").document(transfer_id).set(transfer_doc)
+        return transfer_doc
+
+    def list_incoming_transfers(self, recipient_uid: str) -> List[Dict[str, Any]]:
+        """Lists all active files shared with this recipient."""
+        coll = self.db.collection("cns_shared_transfers")
+        docs = coll.where(filter=FieldFilter("recipient_uid", "==", recipient_uid)).stream()
+        results = []
+        for doc in docs:
+            d = doc.to_dict()
+            if d.get("status") == "ACTIVE":
+                results.append(d)
+        results.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return results
+
+    def list_outgoing_transfers(self, sender_uid: str) -> List[Dict[str, Any]]:
+        """Lists all files this user has shared with other recipients."""
+        coll = self.db.collection("cns_shared_transfers")
+        docs = coll.where(filter=FieldFilter("sender_uid", "==", sender_uid)).stream()
+        results = [doc.to_dict() for doc in docs]
+        results.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return results
+
+    def revoke_transfer(self, transfer_id: str, sender_uid: str) -> bool:
+        """Revokes a shared transfer (only by the sender)."""
+        doc_ref = self.db.collection("cns_shared_transfers").document(transfer_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            return False
+        d = doc.to_dict()
+        if d.get("sender_uid") != sender_uid:
+            raise PermissionError("Access Denied: You can only revoke your own shared transfers.")
+        doc_ref.delete()
+        return True
+
+    def download_shared_file(
+        self,
+        transfer_id: str,
+        recipient_uid: str,
+        recipient_private_key_pem: str,
+        output_dir: Optional[str] = None
+    ) -> Tuple[str, bool, Dict[str, Any]]:
+        """
+        Decrypts and downloads a shared file using the Recipient's Private Key.
+        Strict verification:
+        - Recipient UID must match.
+        - Status must be ACTIVE.
+        - RSA decryption succeeds only if recipient's private key matches.
+        """
+        trans_ref = self.db.collection("cns_shared_transfers").document(transfer_id)
+        trans_doc = trans_ref.get()
+        if not trans_doc.exists:
+            raise KeyError(f"Shared transfer {transfer_id} not found or was revoked.")
+
+        transfer = trans_doc.to_dict()
+        if transfer.get("status") != "ACTIVE":
+            raise PermissionError("This transfer has been revoked by the sender.")
+
+        if transfer.get("recipient_uid") != recipient_uid:
+            raise PermissionError("Access Denied: You are not the authorized recipient of this transfer.")
+
+        file_id = transfer["file_id"]
+        doc_ref = self.db.collection(self.collection_name).document(file_id)
+        doc = doc_ref.get()
+        if not doc.exists:
+            raise KeyError("Original file has been removed by the owner.")
+
+        file_data = doc.to_dict()
+
+        # 1. Fetch ciphertext bytes
+        if not file_data.get("is_chunked", False):
+            ciphertext = file_data.get("ciphertext", b"")
+        else:
+            num_chunks = file_data.get("num_chunks", 1)
+            chunk_bytes = []
+            for i in range(num_chunks):
+                chunk_doc = doc_ref.collection("chunks").document(f"chunk_{i}").get()
+                if not chunk_doc.exists:
+                    raise IOError(f"Missing chunk {i} for file {file_id}")
+                chunk_bytes.append(chunk_doc.to_dict()["data"])
+            ciphertext = b"".join(chunk_bytes)
+
+        # 2. Decrypt with Recipient's Private Key
+        protocol = transfer.get("protocol", "CP2")
+        if "CP1" in protocol:
+            plaintext, dec_time = crypto_engine.decrypt_cp1_rsa(ciphertext, recipient_private_key_pem)
+        else:
+            plaintext, dec_time = crypto_engine.decrypt_cp2_hybrid(
+                ciphertext,
+                transfer.get("encrypted_key_b64", ""),
+                transfer.get("nonce_b64", ""),
+                recipient_private_key_pem
+            )
+
+        transfer["decrypt_time_ms"] = dec_time
+
+        # 3. Verify SHA-256 integrity
+        computed_hash = crypto_engine.compute_sha256(plaintext)
+        integrity_ok = (computed_hash == transfer.get("sha256"))
+
+        # 4. Save to Disk
+        if not output_dir:
+            output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "decrypted_files")
+        os.makedirs(output_dir, exist_ok=True)
+
+        output_path = os.path.join(output_dir, transfer["file_name"])
+        with open(output_path, "wb") as f:
+            f.write(plaintext)
+
+        return output_path, integrity_ok, transfer
+
